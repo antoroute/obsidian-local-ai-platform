@@ -13,9 +13,9 @@
 
 The current gateway bootstrap now includes baseline token authentication:
 
-- `docker-compose.yml` does not publish Redis, PostgreSQL, or Ollama ports
-- `ai-gateway` is the only service with a host port binding
-- The gateway binding is restricted to `127.0.0.1` during bootstrap
+- `docker-compose.yml` does not publish Redis, PostgreSQL, Ollama, or worker ports
+- only the reverse proxy publishes host ports, on `80` and `443`
+- `ai-gateway` is no longer published directly on a host port in the default stack
 - Placeholder credentials in `.env.example` are intentionally non-secret defaults
 - Every API route remains protected except `GET /v1/health`
 - Bearer tokens follow the `obsai_live_<random_secret>` format
@@ -24,6 +24,8 @@ The current gateway bootstrap now includes baseline token authentication:
 - Scope checks are enforced per endpoint, starting with `models:list` on `GET /v1/models`
 - Ollama is reachable only through explicit gateway actions such as note summarization
 - The gateway does not expose generic Ollama passthrough routes or administrative Ollama endpoints
+- `ai_internal` is configured as an internal-only Docker network
+- only `ai-gateway` is attached to both the ingress and internal networks
 
 ## Current token model
 
@@ -43,6 +45,7 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - Ollama must never be exposed publicly
 - Clients must never call Ollama directly
 - `ai-gateway` is the only allowed interface to Ollama
+- port `11434` must never be published on the Docker host
 - Model usage is constrained by an `ALLOWED_MODELS` allowlist
 - The gateway applies note and template size limits before calling Ollama
 - The gateway must not expose Ollama endpoints for `pull`, `delete`, `create`, or `show`
@@ -69,6 +72,7 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - Keep `.env` out of version control
 - Limit server access to administrators
 - Publish only the reverse proxy service publicly
+- Verify that `5432`, `6379`, and `11434` are not published on the host
 - Keep GPU inference containers on an internal Docker network
 - Do not log `Authorization` headers or full bearer tokens
 - Rotate and revoke development tokens regularly

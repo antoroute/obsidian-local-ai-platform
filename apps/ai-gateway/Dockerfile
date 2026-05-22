@@ -8,7 +8,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY app ./app
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . "psycopg[binary]>=3.1,<4.0"
 
 EXPOSE 8000
 

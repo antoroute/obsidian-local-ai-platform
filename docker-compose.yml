@@ -1,4 +1,26 @@
 services:
+  reverse-proxy:
+    image: traefik:v3.1
+    command:
+      - --configFile=/etc/traefik/traefik.yml
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./infra/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+    networks:
+      - proxy
+    depends_on:
+      ai-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   ai-gateway:
     build:
       context: ./apps/ai-gateway
@@ -7,17 +29,57 @@ services:
       AI_GATEWAY_PORT: ${AI_GATEWAY_PORT:-8000}
       AI_GATEWAY_LOG_LEVEL: ${AI_GATEWAY_LOG_LEVEL:-info}
       AI_GATEWAY_REQUEST_MAX_BYTES: ${AI_GATEWAY_REQUEST_MAX_BYTES:-10485760}
-      AI_GATEWAY_ALLOWED_MODELS: ${AI_GATEWAY_ALLOWED_MODELS:-llama3.1:8b}
       AI_GATEWAY_DATABASE_URL: ${AI_GATEWAY_DATABASE_URL:-postgresql+psycopg://app:change-me@postgres:5432/obsidian_ai}
       AI_GATEWAY_REDIS_URL: ${AI_GATEWAY_REDIS_URL:-redis://redis:6379/0}
-      AI_GATEWAY_OLLAMA_URL: ${AI_GATEWAY_OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-qwen2.5:14b}
+      ALLOWED_MODELS: ${ALLOWED_MODELS:-qwen2.5:14b,mistral:7b}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-120}
+      MAX_NOTE_CHARS: ${MAX_NOTE_CHARS:-200000}
+      MAX_TEMPLATE_CHARS: ${MAX_TEMPLATE_CHARS:-50000}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:8000:8000"
+      ollama:
+        condition: service_healthy
+    networks:
+      - proxy
+      - ai_internal
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "from urllib.request import urlopen; import sys; sys.exit(0 if urlopen('http://127.0.0.1:8000/v1/health').status == 200 else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${COMPOSE_PROJECT_NAME:-obsidian-local-ai-platform}_proxy
+      - traefik.http.routers.ai-gateway-web.rule=Host(`${PUBLIC_BASE_HOST:-localhost}`)
+      - traefik.http.routers.ai-gateway-web.entrypoints=web
+      - traefik.http.routers.ai-gateway-web.middlewares=ai-gateway-security
+      - traefik.http.routers.ai-gateway-websecure.rule=Host(`${PUBLIC_BASE_HOST:-localhost}`)
+      - traefik.http.routers.ai-gateway-websecure.entrypoints=websecure
+      - traefik.http.routers.ai-gateway-websecure.tls=true
+      - traefik.http.routers.ai-gateway-websecure.middlewares=ai-gateway-security
+      - traefik.http.services.ai-gateway.loadbalancer.server.port=8000
+      - traefik.http.middlewares.ai-gateway-security.headers.frameDeny=true
+      - traefik.http.middlewares.ai-gateway-security.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.ai-gateway-security.headers.browserXssFilter=true
+      - traefik.http.middlewares.ai-gateway-security.headers.referrerPolicy=no-referrer
+      - traefik.http.middlewares.ai-gateway-security.headers.customResponseHeaders.X-Robots-Tag=noindex,nofollow,noarchive,nosnippet
+      - traefik.http.middlewares.ai-gateway-security.headers.stsSeconds=31536000
+      - traefik.http.middlewares.ai-gateway-security.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.ai-gateway-security.headers.stsPreload=true
     restart: unless-stopped
 
   whisper-worker:
@@ -27,9 +89,16 @@ services:
       WHISPER_WORKER_LOG_LEVEL: ${WHISPER_WORKER_LOG_LEVEL:-info}
       WHISPER_WORKER_REDIS_URL: ${WHISPER_WORKER_REDIS_URL:-redis://redis:6379/0}
       WHISPER_WORKER_QUEUE: ${WHISPER_WORKER_QUEUE:-transcription_jobs}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     depends_on:
       redis:
         condition: service_healthy
+    networks:
+      - ai_internal
+    gpus:
+      - driver: nvidia
+        count: all
     restart: unless-stopped
 
   postgres:
@@ -40,6 +109,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    networks:
+      - ai_internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
@@ -50,6 +121,8 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - ai_internal
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -59,12 +132,32 @@ services:
 
   ollama:
     image: ollama/ollama:latest
-    expose:
-      - "11434"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     volumes:
       - ollama-data:/root/.ollama
+    networks:
+      - ai_internal
+    expose:
+      - "11434"
+    gpus:
+      - driver: nvidia
+        count: all
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
-    # GPU wiring will be added in a dedicated infrastructure step.
+
+networks:
+  proxy:
+    driver: bridge
+  ai_internal:
+    driver: bridge
+    internal: true
 
 volumes:
   postgres-data:
