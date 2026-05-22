@@ -73,6 +73,14 @@ npm run build
 npm run check
 ```
 
+The plugin MVP now supports:
+
+- Obsidian settings for API URL, API token, default model, templates folder, and output folder
+- the command `AI Meeting Assistant: Summarize current note`
+- summary note creation in the vault after a successful `POST /v1/notes/summarize` call
+
+Plugin-specific setup details are documented in [apps/obsidian-plugin/README.md](C:/Users/Antonin/projet_perso/obsidian-local-ai-platform/apps/obsidian-plugin/README.md).
+
 ### Whisper worker
 
 ```powershell
