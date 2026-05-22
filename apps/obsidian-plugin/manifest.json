@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-local-ai-platform",
+  "name": "Local AI Platform",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Bootstrap plugin for a private AI workflow in Obsidian.",
+  "author": "Antonin",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

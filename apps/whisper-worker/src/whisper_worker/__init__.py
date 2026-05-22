@@ -1,0 +1,1 @@
+"""Minimal whisper worker package."""

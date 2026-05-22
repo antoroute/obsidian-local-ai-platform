@@ -1,0 +1,71 @@
+services:
+  ai-gateway:
+    build:
+      context: ./apps/ai-gateway
+    environment:
+      AI_GATEWAY_HOST: ${AI_GATEWAY_HOST:-0.0.0.0}
+      AI_GATEWAY_PORT: ${AI_GATEWAY_PORT:-8000}
+      AI_GATEWAY_LOG_LEVEL: ${AI_GATEWAY_LOG_LEVEL:-info}
+      AI_GATEWAY_REQUEST_MAX_BYTES: ${AI_GATEWAY_REQUEST_MAX_BYTES:-10485760}
+      AI_GATEWAY_ALLOWED_MODELS: ${AI_GATEWAY_ALLOWED_MODELS:-llama3.1:8b}
+      AI_GATEWAY_DATABASE_URL: ${AI_GATEWAY_DATABASE_URL:-postgresql+psycopg://app:change-me@postgres:5432/obsidian_ai}
+      AI_GATEWAY_REDIS_URL: ${AI_GATEWAY_REDIS_URL:-redis://redis:6379/0}
+      AI_GATEWAY_OLLAMA_URL: ${AI_GATEWAY_OLLAMA_URL:-http://ollama:11434}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  whisper-worker:
+    build:
+      context: ./apps/whisper-worker
+    environment:
+      WHISPER_WORKER_LOG_LEVEL: ${WHISPER_WORKER_LOG_LEVEL:-info}
+      WHISPER_WORKER_REDIS_URL: ${WHISPER_WORKER_REDIS_URL:-redis://redis:6379/0}
+      WHISPER_WORKER_QUEUE: ${WHISPER_WORKER_QUEUE:-transcription_jobs}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-obsidian_ai}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    expose:
+      - "11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    # GPU wiring will be added in a dedicated infrastructure step.
+
+volumes:
+  postgres-data:
+  ollama-data:
