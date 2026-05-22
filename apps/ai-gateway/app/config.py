@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     host: str = Field(default="127.0.0.1", alias="AI_GATEWAY_HOST")
     port: int = Field(default=8000, alias="AI_GATEWAY_PORT")
     log_level: str = Field(default="info", alias="AI_GATEWAY_LOG_LEVEL")
+    database_url: str = Field(default="sqlite:///./ai_gateway.db", alias="AI_GATEWAY_DATABASE_URL")
 
 
 @lru_cache
