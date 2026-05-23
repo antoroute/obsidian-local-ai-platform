@@ -330,11 +330,40 @@ Example response:
 
 - Typed request and response models
 - Authentication on every endpoint except `/v1/health`
+- CORS preflight support for Obsidian and Electron clients, including multipart audio upload requests
 - Explicit validation and bounded payload sizes
 - Stable, predictable JSON error responses
 - API tokens use the `obsai_live_<random_secret>` format
 - Only token hashes are stored server-side
 - Ollama is accessed only through controlled gateway endpoints, never through a generic proxy
+
+## CORS for Obsidian and Electron
+
+Obsidian desktop can trigger browser-style CORS preflight requests, especially for authenticated `POST` calls and multipart uploads such as `POST /v1/audio/transcribe`.
+
+The gateway therefore supports `OPTIONS` preflight requests for the implemented API routes, including:
+
+- `/v1/models`
+- `/v1/notes/summarize`
+- `/v1/audio/transcribe`
+- `/v1/jobs/{job_id}`
+- `/v1/jobs/{job_id}/result`
+- `/v1/meetings/generate`
+- `/v1/meetings/generate-from-job`
+
+CORS behavior is configuration-driven:
+
+- `CORS_ENABLED`
+- `CORS_ALLOW_ORIGINS`
+- `CORS_ALLOW_METHODS`
+- `CORS_ALLOW_HEADERS`
+- `CORS_ALLOW_CREDENTIALS`
+
+Important:
+
+- CORS support does not make protected endpoints public
+- Bearer token authentication remains required on every endpoint except `/v1/health`
+- use `CORS_ALLOW_ORIGINS=*` only for development when `CORS_ALLOW_CREDENTIALS=false`
 
 ## Typical audio-to-meeting workflow
 

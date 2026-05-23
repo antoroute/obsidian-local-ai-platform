@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from app.config import get_settings
 from app.database import get_session_factory
-from app.main import app, get_ollama_client
+from app.main import app, get_llm_client
 from app.services.ollama_client import OllamaChatResult, OllamaUnavailableError
 from app.token_repository import create_api_token
 
@@ -16,7 +17,19 @@ class FakeOllamaClient:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
 
-    async def summarize_markdown(self, *, model: str, system_prompt: str, user_prompt: str) -> OllamaChatResult:
+    async def summarize_note(
+        self,
+        *,
+        model: str,
+        title: str,
+        note_chars: int,
+        template_chars: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult:
+        assert title
+        assert note_chars > 0
+        assert template_chars >= 0
         assert "Never invent facts" in system_prompt
         assert "Template or instructions" in user_prompt
         if self.fail:
@@ -49,7 +62,7 @@ def test_notes_summarize_rejects_missing_scope(client: TestClient) -> None:
 
 
 def test_notes_summarize_accepts_valid_request(client: TestClient) -> None:
-    app.dependency_overrides[get_ollama_client] = lambda: FakeOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: FakeOllamaClient()
     token = create_token(["notes:summarize"])
 
     response = client.post(
@@ -103,9 +116,8 @@ def test_notes_summarize_rejects_empty_note(client: TestClient) -> None:
 
 
 def test_notes_summarize_rejects_note_too_long(client: TestClient, monkeypatch) -> None:
-    app.dependency_overrides[get_ollama_client] = lambda: FakeOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: FakeOllamaClient()
     monkeypatch.setenv("MAX_NOTE_CHARS", "10")
-    from app.config import get_settings
 
     get_settings.cache_clear()
     token = create_token(["notes:summarize"])
@@ -121,7 +133,7 @@ def test_notes_summarize_rejects_note_too_long(client: TestClient, monkeypatch) 
 
 
 def test_notes_summarize_handles_ollama_unavailable(client: TestClient) -> None:
-    app.dependency_overrides[get_ollama_client] = lambda: FakeOllamaClient(fail=True)
+    app.dependency_overrides[get_llm_client] = lambda: FakeOllamaClient(fail=True)
     token = create_token(["notes:summarize"])
 
     response = client.post(
@@ -134,6 +146,34 @@ def test_notes_summarize_handles_ollama_unavailable(client: TestClient) -> None:
 
     assert response.status_code == 503
     assert response.json() == {"detail": "The summarization backend is currently unavailable."}
+
+
+def test_notes_summarize_fake_provider_returns_deterministic_markdown(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    monkeypatch.setenv("DEFAULT_MODEL", "fake-local-model")
+    monkeypatch.setenv("ALLOWED_MODELS", "fake-local-model,mistral:latest,qwen2.5:14b")
+    get_settings.cache_clear()
+    token = create_token(["notes:summarize"])
+
+    response = client.post(
+        "/v1/notes/summarize",
+        headers=create_bearer_header(token),
+        json={
+            "title": "Project sync",
+            "note_content": "Agenda:\n- Budget\n- Risks",
+            "template": "## Summary\n## Risks\n## Actions",
+            "model": "fake-local-model",
+        },
+    )
+
+    get_settings.cache_clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model"] == "fake-local-model"
+    assert payload["title"] == "Project sync"
+    assert "# Resume fake" in payload["summary_markdown"]
+    assert "workflow de developpement" in payload["summary_markdown"]
 
 
 def test_no_generic_ollama_proxy_route_exists(client: TestClient) -> None:

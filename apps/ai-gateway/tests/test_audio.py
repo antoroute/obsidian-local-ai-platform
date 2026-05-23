@@ -33,6 +33,21 @@ def test_audio_transcribe_requires_token(client: TestClient) -> None:
     assert response.status_code == 401
 
 
+def test_audio_transcribe_preflight_options_returns_cors_headers(client: TestClient) -> None:
+    response = client.options(
+        "/v1/audio/transcribe",
+        headers={
+            "Origin": "app://obsidian.md",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+
+    assert response.status_code in {200, 204}
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert "POST" in response.headers["access-control-allow-methods"]
+
+
 def test_audio_transcribe_rejects_missing_scope(client: TestClient) -> None:
     token = create_token(["notes:summarize"])
     response = upload_audio(client, token)

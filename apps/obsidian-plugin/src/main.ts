@@ -13,7 +13,14 @@ import {
 
 const DEFAULT_TEMPLATE_FILE = "compte-rendu-standard.md";
 const DEFAULT_OUTPUT_FOLDER = "AI Summaries";
+const DEFAULT_MEETINGS_FOLDER = "Meetings";
+const DEFAULT_RECORDINGS_FOLDER = "AI Recordings";
 const DEFAULT_MODEL = "qwen2.5:14b";
+const AUDIO_POLL_INTERVAL_MS = 3_000;
+const AUDIO_POLL_TIMEOUT_MS = 30 * 60 * 1_000;
+const DEFAULT_RECORDING_EXTENSION = ".webm";
+const DEFAULT_RECORDING_MIME_TYPE = "audio/webm";
+const SUPPORTED_AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".webm", ".ogg"]);
 const FALLBACK_TEMPLATE = `# Summary
 
 ## Key points
@@ -56,10 +63,74 @@ interface ModelsResponsePayload {
   models: string[];
 }
 
+interface AudioJobQueuedResponsePayload {
+  job_id: string;
+  status: "queued";
+}
+
+interface JobStatusResponsePayload {
+  job_id: string;
+  status: "queued" | "processing" | "completed" | "failed";
+  created_at: string;
+  updated_at: string;
+  error: string | null;
+}
+
+interface MeetingGenerateFromJobPayload {
+  job_id: string;
+  title: string;
+  manual_notes: string;
+  participants: string[];
+  template: string;
+  model: string;
+}
+
+interface MeetingGenerateFromJobResponsePayload {
+  job_id: string;
+  model: string;
+  title: string;
+  meeting_markdown: string;
+  usage: {
+    transcript_chars: number;
+    manual_notes_chars: number;
+    template_chars: number;
+    participants_count: number;
+  };
+}
+
 interface TemplateChoice {
   label: string;
   templateContent: string;
   sourcePath: string | null;
+}
+
+interface MeetingMetadata {
+  title: string;
+  manualNotes: string;
+}
+
+interface RecordingStartMetadata {
+  title: string;
+}
+
+interface ActiveRecordingSession {
+  title: string;
+  notePath: string;
+  startedAt: Date;
+  mimeType: string;
+  fileExtension: string;
+  recorder: MediaRecorder;
+  stream: MediaStream;
+  chunks: BlobPart[];
+}
+
+interface RecordingStopResult {
+  blob: Blob;
+  title: string;
+  notePath: string;
+  startedAt: Date;
+  mimeType: string;
+  fileExtension: string;
 }
 
 interface PluginSettings {
@@ -68,6 +139,8 @@ interface PluginSettings {
   defaultModel: string;
   templatesFolder: string;
   outputFolder: string;
+  meetingsFolder: string;
+  recordingsFolder: string;
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -76,10 +149,13 @@ const DEFAULT_SETTINGS: PluginSettings = {
   defaultModel: DEFAULT_MODEL,
   templatesFolder: "Templates",
   outputFolder: DEFAULT_OUTPUT_FOLDER,
+  meetingsFolder: DEFAULT_MEETINGS_FOLDER,
+  recordingsFolder: DEFAULT_RECORDINGS_FOLDER,
 };
 
 export default class LocalAiPlatformPlugin extends Plugin {
   settings: PluginSettings = DEFAULT_SETTINGS;
+  activeRecording: ActiveRecordingSession | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -90,6 +166,27 @@ export default class LocalAiPlatformPlugin extends Plugin {
       name: "AI Meeting Assistant: Summarize current note",
       callback: async () => {
         await this.summarizeCurrentNote();
+      },
+    });
+    this.addCommand({
+      id: "generate-meeting-minutes-from-audio-file",
+      name: "AI Meeting Assistant: Generate meeting minutes from audio file",
+      callback: async () => {
+        await this.generateMeetingMinutesFromAudioFile();
+      },
+    });
+    this.addCommand({
+      id: "start-meeting-recording",
+      name: "AI Meeting Assistant: Start meeting recording",
+      callback: async () => {
+        await this.startMeetingRecording();
+      },
+    });
+    this.addCommand({
+      id: "stop-recording-and-generate-meeting-minutes",
+      name: "AI Meeting Assistant: Stop recording and generate meeting minutes",
+      callback: async () => {
+        await this.stopRecordingAndGenerateMeetingMinutes();
       },
     });
   }
@@ -105,7 +202,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
   async summarizeCurrentNote(): Promise<void> {
     try {
-      this.validateSummarySettings();
+      this.validateCoreSettings();
 
       const activeFile = this.app.workspace.getActiveFile();
       if (!activeFile) {
@@ -133,9 +230,175 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
       new Notice(`AI summary created: ${outputFile.path}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "An unexpected error occurred.";
-      new Notice(message, 8000);
+      this.showUserFacingError(error);
     }
+  }
+
+  async generateMeetingMinutesFromAudioFile(): Promise<void> {
+    try {
+      this.validateCoreSettings();
+
+      const apiBaseUrl = this.getApiBaseUrl();
+      const apiToken = this.getApiToken();
+      const audioFile = await pickAudioFile();
+      if (!audioFile) {
+        throw new UserFacingError("No audio file selected.");
+      }
+
+      ensureSupportedAudioFile(audioFile.name);
+      new Notice(`Uploading audio: ${audioFile.name}`);
+      const queuedJob = await this.uploadAudio(apiBaseUrl, apiToken, audioFile);
+      const completedJob = await this.pollAudioJob(apiBaseUrl, apiToken, queuedJob.job_id);
+      if (completedJob.status !== "completed") {
+        throw new UserFacingError("The audio job did not complete successfully.");
+      }
+
+      const metadata = await promptForMeetingMetadata(this.app, stripFileExtension(audioFile.name));
+      const templateChoice = await this.chooseTemplate();
+      new Notice("Generating meeting minutes...");
+      const result = await this.requestMeetingFromJob(apiBaseUrl, apiToken, {
+        job_id: queuedJob.job_id,
+        title: metadata.title,
+        manual_notes: metadata.manualNotes,
+        participants: [],
+        template: templateChoice.templateContent,
+        model: this.getDefaultModel(),
+      });
+
+      const outputFile = await this.writeMeetingNote({
+        response: result,
+        templateChoice,
+        sourceAudioName: audioFile.name,
+      });
+      new Notice(`Meeting minutes created: ${outputFile.path}`);
+    } catch (error) {
+      this.showUserFacingError(error);
+    }
+  }
+
+  async startMeetingRecording(): Promise<void> {
+    try {
+      this.validateRecordingSettings();
+      this.ensureMediaRecorderAvailable();
+
+      if (this.activeRecording) {
+        throw new UserFacingError("A meeting recording is already in progress.");
+      }
+
+      const metadata = await promptForRecordingTitle(this.app);
+      new Notice("Reminder: inform participants before recording the meeting.", 8000);
+
+      const stream = await this.requestMicrophoneStream();
+      try {
+        const recordingOptions = pickRecordingOptions();
+        const recorder = new MediaRecorder(stream, recordingOptions.mimeType ? { mimeType: recordingOptions.mimeType } : undefined);
+        const meetingsFolder = this.getMeetingsFolder();
+        await ensureFolderExists(this.app, meetingsFolder);
+
+        const startedAt = new Date();
+        const fileBaseName = `${formatDateTimeForFile(startedAt)} - ${sanitizeFileName(metadata.title)}`;
+        const notePath = normalizePath(`${meetingsFolder}/${fileBaseName}.md`);
+        const noteContent = buildMeetingSourceNote({
+          title: metadata.title,
+          startedAt,
+          recordingStatus: "in progress",
+        });
+        const noteFile = await createOrReplaceFile(this.app, notePath, noteContent);
+        await this.app.workspace.getLeaf(true).openFile(noteFile);
+
+        const chunks: BlobPart[] = [];
+        recorder.addEventListener("dataavailable", (event: BlobEvent) => {
+          if (event.data.size > 0) {
+            chunks.push(event.data);
+          }
+        });
+
+        recorder.start();
+        this.activeRecording = {
+          title: metadata.title,
+          notePath: noteFile.path,
+          startedAt,
+          mimeType: recorder.mimeType || recordingOptions.mimeType || DEFAULT_RECORDING_MIME_TYPE,
+          fileExtension: recordingOptions.fileExtension,
+          recorder,
+          stream,
+          chunks,
+        };
+
+        new Notice(`Recording started for "${metadata.title}".`, 6000);
+      } catch (error) {
+        stopMediaStream(stream);
+        throw error;
+      }
+    } catch (error) {
+      this.showUserFacingError(error);
+    }
+  }
+
+  async stopRecordingAndGenerateMeetingMinutes(): Promise<void> {
+    try {
+      this.validateCoreSettings();
+      this.getMeetingsFolder();
+      this.getRecordingsFolder();
+
+      if (!this.activeRecording) {
+        throw new UserFacingError("No meeting recording is active.");
+      }
+
+      new Notice("Stopping recording...");
+      const recording = await this.finishActiveRecording();
+      if (recording.blob.size === 0) {
+        throw new UserFacingError("The recording is empty.");
+      }
+
+      const savedAudio = await this.saveRecordingToVault(recording);
+      const sourceNote = await this.completeMeetingSourceNote(recording, savedAudio.file);
+      const manualNotes = await this.app.vault.read(sourceNote);
+      const templateChoice = await this.chooseTemplate();
+
+      const apiBaseUrl = this.getApiBaseUrl();
+      const apiToken = this.getApiToken();
+      new Notice(`Uploading recording: ${savedAudio.file.name}`);
+      const uploadFile = createFileFromBlob(savedAudio.blob, savedAudio.file.name, recording.mimeType);
+      const queuedJob = await this.uploadAudio(apiBaseUrl, apiToken, uploadFile);
+      await this.pollAudioJob(apiBaseUrl, apiToken, queuedJob.job_id);
+
+      new Notice("Generating meeting minutes...");
+      const result = await this.requestMeetingFromJob(apiBaseUrl, apiToken, {
+        job_id: queuedJob.job_id,
+        title: recording.title,
+        manual_notes: manualNotes,
+        participants: [],
+        template: templateChoice.templateContent,
+        model: this.getDefaultModel(),
+      });
+
+      const outputFile = await this.writeMeetingNote({
+        response: result,
+        templateChoice,
+        sourceAudioName: savedAudio.file.name,
+        sourceNoteFile: sourceNote,
+        sourceAudioFile: savedAudio.file,
+        generatedAt: new Date(),
+      });
+
+      new Notice(`Meeting minutes created: ${outputFile.path}`);
+    } catch (error) {
+      this.showUserFacingError(error);
+    }
+  }
+
+  validateCoreSettings(): void {
+    this.getApiBaseUrl();
+    this.getApiToken();
+    this.getDefaultModel();
+    this.getOutputFolder();
+  }
+
+  validateRecordingSettings(): void {
+    this.validateCoreSettings();
+    this.getMeetingsFolder();
+    this.getRecordingsFolder();
   }
 
   getApiBaseUrl(): string {
@@ -162,6 +425,10 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return value;
   }
 
+  getTemplatesFolder(): string {
+    return normalizePath(this.settings.templatesFolder.trim() || "Templates");
+  }
+
   getOutputFolder(): string {
     const value = this.settings.outputFolder.trim();
     if (!value) {
@@ -170,23 +437,41 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return normalizePath(value);
   }
 
-  validateSummarySettings(): void {
-    this.getApiBaseUrl();
-    this.getApiToken();
-    this.getDefaultModel();
-    this.getOutputFolder();
+  getMeetingsFolder(): string {
+    const value = this.settings.meetingsFolder.trim();
+    if (!value) {
+      throw new UserFacingError("Missing meetings folder.");
+    }
+    return normalizePath(value);
+  }
+
+  getRecordingsFolder(): string {
+    const value = this.settings.recordingsFolder.trim();
+    if (!value) {
+      throw new UserFacingError("Missing recordings folder.");
+    }
+    return normalizePath(value);
+  }
+
+  ensureMediaRecorderAvailable(): void {
+    if (typeof MediaRecorder === "undefined") {
+      throw new UserFacingError("MediaRecorder is not supported in this Obsidian environment.");
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new UserFacingError("Microphone access is not available in this Obsidian environment.");
+    }
+  }
+
+  async requestMicrophoneStream(): Promise<MediaStream> {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      throw new UserFacingError("Microphone permission was denied or unavailable.");
+    }
   }
 
   async chooseTemplate(): Promise<TemplateChoice> {
     const availableTemplates = await this.listTemplateChoices();
-    if (availableTemplates.length === 0) {
-      return {
-        label: "Built-in default template",
-        templateContent: FALLBACK_TEMPLATE,
-        sourcePath: null,
-      };
-    }
-
     return chooseTemplateWithModal(this.app, availableTemplates);
   }
 
@@ -198,12 +483,12 @@ export default class LocalAiPlatformPlugin extends Plugin {
         sourcePath: null,
       },
     ];
-    const templatesFolder = this.settings.templatesFolder.trim();
+    const templatesFolder = this.getTemplatesFolder();
     if (!templatesFolder) {
       return choices;
     }
 
-    const folder = this.app.vault.getAbstractFileByPath(normalizePath(templatesFolder));
+    const folder = this.app.vault.getAbstractFileByPath(templatesFolder);
     if (!folder) {
       return choices;
     }
@@ -227,7 +512,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       const apiToken = this.getApiToken();
       new Notice("Testing AI Gateway connection...");
 
-      const responseText = await this.performRequest({
+      const responseText = await this.performJsonRequest({
         apiBaseUrl,
         apiToken,
         path: "/v1/models",
@@ -243,13 +528,12 @@ export default class LocalAiPlatformPlugin extends Plugin {
       const payload = this.parseModelsResponse(responseText);
       new Notice(`Connection successful. Models: ${payload.models.join(", ")}`, 8000);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Connection test failed.";
-      new Notice(message, 8000);
+      this.showUserFacingError(error);
     }
   }
 
   async requestSummary(apiBaseUrl: string, apiToken: string, payload: SummarizeRequestPayload): Promise<SummarizeResponsePayload> {
-    const responseText = await this.performRequest({
+    const responseText = await this.performJsonRequest({
       apiBaseUrl,
       apiToken,
       path: "/v1/notes/summarize",
@@ -270,7 +554,111 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return this.parseSummaryResponse(responseText);
   }
 
-  async performRequest(input: {
+  async requestMeetingFromJob(
+    apiBaseUrl: string,
+    apiToken: string,
+    payload: MeetingGenerateFromJobPayload,
+  ): Promise<MeetingGenerateFromJobResponsePayload> {
+    const responseText = await this.performJsonRequest({
+      apiBaseUrl,
+      apiToken,
+      path: "/v1/meetings/generate-from-job",
+      method: "POST",
+      body: JSON.stringify(payload),
+      errorMap: {
+        401: "The API token is invalid or expired.",
+        403: "The token is missing meetings:generate or the model is not allowed.",
+        404: "The transcription job was not found.",
+        409: "The transcription job is not ready or failed.",
+        413: "The notes, participants, or template exceed the AI Gateway limits.",
+        422: "The meeting request is invalid.",
+        500: "The stored transcription result is invalid.",
+        502: "The AI Gateway returned an invalid upstream response.",
+        503: "The AI Gateway meeting generation service is unavailable.",
+      },
+      unavailableMessage: "The AI Gateway is unreachable.",
+      invalidJsonMessage: "The AI Gateway returned an invalid meeting response.",
+    });
+
+    return this.parseMeetingGenerateFromJobResponse(responseText);
+  }
+
+  async uploadAudio(apiBaseUrl: string, apiToken: string, audioFile: File): Promise<AudioJobQueuedResponsePayload> {
+    try {
+      const formData = new FormData();
+      formData.append("file", audioFile);
+
+      const response = await fetch(`${apiBaseUrl}/v1/audio/transcribe`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+        },
+        body: formData,
+      });
+
+      const responseText = await response.text();
+      if (!response.ok) {
+        this.throwApiError(response.status, responseText, {
+          400: "The audio upload was rejected.",
+          401: "The API token is invalid or expired.",
+          403: "The token is missing the audio:transcribe scope.",
+          409: "The audio job could not be created.",
+          413: "The audio file is too large for the AI Gateway limits.",
+          422: "The audio file extension is not supported or the upload is invalid.",
+          502: "The AI Gateway returned an invalid upstream response.",
+          503: "The AI Gateway is unavailable.",
+        });
+      }
+
+      return this.parseAudioJobQueuedResponse(responseText);
+    } catch (error) {
+      if (error instanceof UserFacingError) {
+        throw error;
+      }
+      throw this.normalizeNetworkError(error, "The audio upload failed.");
+    }
+  }
+
+  async pollAudioJob(apiBaseUrl: string, apiToken: string, jobId: string): Promise<JobStatusResponsePayload> {
+    const startedAt = Date.now();
+    let lastStatus: JobStatusResponsePayload["status"] | null = null;
+
+    while (Date.now() - startedAt < AUDIO_POLL_TIMEOUT_MS) {
+      const responseText = await this.performJsonRequest({
+        apiBaseUrl,
+        apiToken,
+        path: `/v1/jobs/${jobId}`,
+        method: "GET",
+        errorMap: {
+          401: "The API token is invalid or expired.",
+          403: "The token is not allowed to access this job.",
+          404: "The audio job was not found.",
+          503: "The AI Gateway is unavailable.",
+        },
+        unavailableMessage: "The AI Gateway is unreachable.",
+        invalidJsonMessage: "The AI Gateway returned an invalid job status response.",
+      });
+
+      const payload = this.parseJobStatusResponse(responseText);
+      if (payload.status !== lastStatus) {
+        lastStatus = payload.status;
+        new Notice(`Audio transcription job ${payload.status}.`, 4000);
+      }
+
+      if (payload.status === "completed") {
+        return payload;
+      }
+      if (payload.status === "failed") {
+        throw new UserFacingError(payload.error || "The audio transcription job failed.");
+      }
+
+      await sleep(AUDIO_POLL_INTERVAL_MS);
+    }
+
+    throw new UserFacingError("Audio transcription timed out.");
+  }
+
+  async performJsonRequest(input: {
     apiBaseUrl: string;
     apiToken: string;
     path: string;
@@ -303,27 +691,157 @@ export default class LocalAiPlatformPlugin extends Plugin {
       if (error instanceof UserFacingError) {
         throw error;
       }
-
-      if (error instanceof Error && error.message) {
-        if (error.message.includes("ECONNREFUSED") || error.message.includes("ENOTFOUND")) {
-          throw new UserFacingError(`${input.unavailableMessage} Check the API Base URL and server availability.`);
-        }
-
-        if (error.message.includes("Certificate") || error.message.includes("SSL")) {
-          throw new UserFacingError("TLS validation failed. Use HTTPS with a valid certificate, or http://127.0.0.1 only for local development.");
-        }
-
-        if (error.message.includes("Unexpected token") || error.message.includes("JSON")) {
-          throw new UserFacingError(input.invalidJsonMessage);
-        }
-      }
-
-      if (typeof error === "object" && error !== null) {
-        throw new UserFacingError(`${input.unavailableMessage} The request failed before a valid response was received.`);
-      }
-
-      throw error;
+      throw this.normalizeNetworkError(error, input.unavailableMessage, input.invalidJsonMessage);
     }
+  }
+
+  async finishActiveRecording(): Promise<RecordingStopResult> {
+    const session = this.activeRecording;
+    if (!session) {
+      throw new UserFacingError("No meeting recording is active.");
+    }
+    this.activeRecording = null;
+
+    const recorder = session.recorder;
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      const handleStop = (): void => {
+        cleanup();
+        resolve(new Blob(session.chunks, { type: session.mimeType }));
+      };
+      const handleError = (): void => {
+        cleanup();
+        reject(new UserFacingError("The recording could not be stopped cleanly."));
+      };
+      const cleanup = (): void => {
+        recorder.removeEventListener("stop", handleStop);
+        recorder.removeEventListener("error", handleError);
+        stopMediaStream(session.stream);
+      };
+
+      recorder.addEventListener("stop", handleStop, { once: true });
+      recorder.addEventListener("error", handleError, { once: true });
+      recorder.stop();
+    });
+
+    return {
+      blob,
+      title: session.title,
+      notePath: session.notePath,
+      startedAt: session.startedAt,
+      mimeType: session.mimeType,
+      fileExtension: session.fileExtension,
+    };
+  }
+
+  async saveRecordingToVault(recording: RecordingStopResult): Promise<{ file: TFile; blob: Blob }> {
+    const recordingsFolder = this.getRecordingsFolder();
+    await ensureFolderExists(this.app, recordingsFolder);
+
+    const fileBaseName = `${formatDateTimeForFile(recording.startedAt)} - ${sanitizeFileName(recording.title)}`;
+    const filePath = normalizePath(`${recordingsFolder}/${fileBaseName}${recording.fileExtension}`);
+    const arrayBuffer = await recording.blob.arrayBuffer();
+
+    try {
+      await this.app.vault.adapter.writeBinary(filePath, arrayBuffer);
+    } catch {
+      throw new UserFacingError("Failed to save the recorded audio in the vault.");
+    }
+
+    const savedFile = this.app.vault.getAbstractFileByPath(filePath);
+    if (!(savedFile instanceof TFile)) {
+      throw new UserFacingError("The recorded audio could not be found in the vault after saving.");
+    }
+
+    return { file: savedFile, blob: recording.blob };
+  }
+
+  async completeMeetingSourceNote(recording: RecordingStopResult, audioFile: TFile): Promise<TFile> {
+    const sourceNote = this.app.vault.getAbstractFileByPath(recording.notePath);
+    if (!(sourceNote instanceof TFile)) {
+      throw new UserFacingError("The meeting note could not be found.");
+    }
+
+    const currentContent = await this.app.vault.read(sourceNote);
+    const audioLink = this.app.metadataCache.fileToLinktext(audioFile, sourceNote.path, true);
+    const nextContent = markMeetingSourceNoteCompleted(currentContent, audioLink);
+    await this.app.vault.modify(sourceNote, nextContent);
+    return sourceNote;
+  }
+
+  async writeSummaryNote(
+    sourceFile: TFile,
+    response: SummarizeResponsePayload,
+    templateChoice: TemplateChoice,
+  ): Promise<TFile> {
+    const outputFolder = this.getOutputFolder();
+    await ensureFolderExists(this.app, outputFolder);
+
+    const date = formatDate(new Date());
+    const safeTitle = sanitizeFileName(sourceFile.basename);
+    const outputPath = normalizePath(`${outputFolder}/${date} - AI Summary - ${safeTitle}.md`);
+    const sourceLink = this.app.metadataCache.fileToLinktext(sourceFile, "", true);
+    const noteContent = buildSummaryNote({
+      title: response.title || sourceFile.basename,
+      sourceLink,
+      model: response.model,
+      templateLabel: templateChoice.label,
+      summaryMarkdown: response.summary_markdown,
+      generatedAt: new Date(),
+    });
+
+    return createOrReplaceFile(this.app, outputPath, noteContent);
+  }
+
+  async writeMeetingNote(input: {
+    response: MeetingGenerateFromJobResponsePayload;
+    templateChoice: TemplateChoice;
+    sourceAudioName: string;
+    sourceNoteFile?: TFile;
+    sourceAudioFile?: TFile;
+    generatedAt?: Date;
+  }): Promise<TFile> {
+    const outputFolder = this.getOutputFolder();
+    await ensureFolderExists(this.app, outputFolder);
+
+    const generatedAt = input.generatedAt ?? new Date();
+    const outputPath = normalizePath(
+      `${outputFolder}/${formatDateTimeForFile(generatedAt)} - Meeting Minutes - ${sanitizeFileName(input.response.title)}.md`,
+    );
+
+    const sourceMeetingLink = input.sourceNoteFile
+      ? this.app.metadataCache.fileToLinktext(input.sourceNoteFile, "", true)
+      : null;
+    const sourceAudioLink = input.sourceAudioFile
+      ? this.app.metadataCache.fileToLinktext(input.sourceAudioFile, "", true)
+      : null;
+    const noteContent = buildMeetingNote({
+      title: input.response.title,
+      generatedAt,
+      model: input.response.model,
+      templateLabel: input.templateChoice.label,
+      jobId: input.response.job_id,
+      audioFileName: input.sourceAudioName,
+      sourceMeetingLink,
+      sourceAudioLink,
+      meetingMarkdown: input.response.meeting_markdown,
+    });
+
+    return createOrReplaceFile(this.app, outputPath, noteContent);
+  }
+
+  normalizeNetworkError(error: unknown, unavailableMessage: string, invalidJsonMessage = "The AI Gateway returned invalid JSON."): UserFacingError {
+    if (error instanceof Error && error.message) {
+      if (error.message.includes("ECONNREFUSED") || error.message.includes("ENOTFOUND")) {
+        return new UserFacingError(`${unavailableMessage} Check the API Base URL and server availability.`);
+      }
+      if (error.message.includes("Certificate") || error.message.includes("SSL")) {
+        return new UserFacingError("TLS validation failed. Use HTTPS with a valid certificate, or http://127.0.0.1 only for local development.");
+      }
+      if (error.message.includes("Unexpected token") || error.message.includes("JSON")) {
+        return new UserFacingError(invalidJsonMessage);
+      }
+    }
+    return new UserFacingError(`${unavailableMessage} The request failed before a valid response was received.`);
   }
 
   throwApiError(status: number, responseText: string, errorMap: Record<number, string>): never {
@@ -346,63 +864,56 @@ export default class LocalAiPlatformPlugin extends Plugin {
   }
 
   parseSummaryResponse(responseText: string): SummarizeResponsePayload {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(responseText);
-    } catch {
-      throw new UserFacingError("The AI Gateway returned an invalid JSON response.");
-    }
-
+    const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid JSON response.");
     if (!isSummarizeResponsePayload(parsed)) {
       throw new UserFacingError("The AI Gateway returned an invalid summary payload.");
     }
-
     return parsed;
   }
 
   parseModelsResponse(responseText: string): ModelsResponsePayload {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(responseText);
-    } catch {
-      throw new UserFacingError("The AI Gateway returned an invalid models response.");
-    }
-
+    const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid models response.");
     if (!isModelsResponsePayload(parsed)) {
       throw new UserFacingError("The AI Gateway returned an invalid models response.");
     }
-
     return parsed;
   }
 
-  async writeSummaryNote(
-    sourceFile: TFile,
-    response: SummarizeResponsePayload,
-    templateChoice: TemplateChoice,
-  ): Promise<TFile> {
-    const outputFolder = this.getOutputFolder();
-    await ensureFolderExists(this.app, outputFolder);
-
-    const date = formatDate(new Date());
-    const safeTitle = sanitizeFileName(sourceFile.basename);
-    const outputPath = normalizePath(`${outputFolder}/${date} - AI Summary - ${safeTitle}.md`);
-    const sourceLink = this.app.metadataCache.fileToLinktext(sourceFile, "", true);
-    const noteContent = buildOutputNote({
-      title: response.title || sourceFile.basename,
-      sourceLink,
-      model: response.model,
-      templateLabel: templateChoice.label,
-      summaryMarkdown: response.summary_markdown,
-      generatedAt: new Date(),
-    });
-
-    const existing = this.app.vault.getAbstractFileByPath(outputPath);
-    if (existing instanceof TFile) {
-      await this.app.vault.modify(existing, noteContent);
-      return existing;
+  parseAudioJobQueuedResponse(responseText: string): AudioJobQueuedResponsePayload {
+    const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid audio job response.");
+    if (!isAudioJobQueuedResponsePayload(parsed)) {
+      throw new UserFacingError("The AI Gateway returned an invalid audio job response.");
     }
+    return parsed;
+  }
 
-    return this.app.vault.create(outputPath, noteContent);
+  parseJobStatusResponse(responseText: string): JobStatusResponsePayload {
+    const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid job status response.");
+    if (!isJobStatusResponsePayload(parsed)) {
+      throw new UserFacingError("The AI Gateway returned an invalid job status response.");
+    }
+    return parsed;
+  }
+
+  parseMeetingGenerateFromJobResponse(responseText: string): MeetingGenerateFromJobResponsePayload {
+    const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid meeting response.");
+    if (!isMeetingGenerateFromJobResponsePayload(parsed)) {
+      throw new UserFacingError("The AI Gateway returned an invalid meeting response.");
+    }
+    return parsed;
+  }
+
+  parseJson<T>(responseText: string, invalidMessage: string): T {
+    try {
+      return JSON.parse(responseText) as T;
+    } catch {
+      throw new UserFacingError(invalidMessage);
+    }
+  }
+
+  showUserFacingError(error: unknown): void {
+    const message = error instanceof Error ? error.message : "An unexpected error occurred.";
+    new Notice(message, 8000);
   }
 }
 
@@ -465,7 +976,7 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Default model")
-      .setDesc("Sent to POST /v1/notes/summarize. Leave the gateway allowlist in sync.")
+      .setDesc("Used for note summaries and meeting generation.")
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_MODEL)
@@ -490,8 +1001,34 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Meetings folder")
+      .setDesc("Meeting notes created during microphone recording are stored here.")
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_MEETINGS_FOLDER)
+          .setValue(this.plugin.settings.meetingsFolder)
+          .onChange(async (value) => {
+            this.plugin.settings.meetingsFolder = value.trim() || DEFAULT_MEETINGS_FOLDER;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Recordings folder")
+      .setDesc("Recorded microphone audio files are saved in the vault here.")
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_RECORDINGS_FOLDER)
+          .setValue(this.plugin.settings.recordingsFolder)
+          .onChange(async (value) => {
+            this.plugin.settings.recordingsFolder = value.trim() || DEFAULT_RECORDINGS_FOLDER;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName("Output folder")
-      .setDesc("Generated summaries are written here. Missing folders are created automatically.")
+      .setDesc("Generated summaries and meeting minutes are written here.")
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_OUTPUT_FOLDER)
@@ -501,6 +1038,141 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }),
       );
+  }
+}
+
+class TemplatePickerModal extends Modal {
+  private readonly choices: TemplateChoice[];
+  private readonly onChoose: (choice: TemplateChoice) => void;
+
+  constructor(app: App, choices: TemplateChoice[], onChoose: (choice: TemplateChoice) => void) {
+    super(app);
+    this.choices = choices;
+    this.onChoose = onChoose;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Choose a template" });
+    contentEl.createEl("p", { text: "Pick the Markdown template to send with this request." });
+
+    for (const choice of this.choices) {
+      const setting = new Setting(contentEl).setName(choice.label);
+      if (choice.sourcePath) {
+        setting.setDesc(choice.sourcePath);
+      } else {
+        setting.setDesc("Uses the built-in fallback template.");
+      }
+      setting.addButton((button) =>
+        button.setButtonText("Use template").setCta().onClick(() => {
+          this.onChoose(choice);
+          this.close();
+        }),
+      );
+    }
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+class MeetingMetadataModal extends Modal {
+  private readonly onSubmit: (value: MeetingMetadata) => void;
+  private titleValue: string;
+  private manualNotesValue = "";
+
+  constructor(app: App, initialTitle: string, onSubmit: (value: MeetingMetadata) => void) {
+    super(app);
+    this.titleValue = initialTitle;
+    this.onSubmit = onSubmit;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Meeting details" });
+
+    new Setting(contentEl)
+      .setName("Meeting title")
+      .setDesc("Required for the generated meeting minutes.")
+      .addText((text) =>
+        text.setValue(this.titleValue).onChange((value) => {
+          this.titleValue = value;
+        }),
+      );
+
+    contentEl.createEl("p", { text: "Manual notes (optional)" });
+    const textarea = contentEl.createEl("textarea");
+    textarea.rows = 10;
+    textarea.style.width = "100%";
+    textarea.addEventListener("input", () => {
+      this.manualNotesValue = textarea.value;
+    });
+
+    new Setting(contentEl).addButton((button) =>
+      button.setButtonText("Generate meeting minutes").setCta().onClick(() => {
+        const trimmedTitle = this.titleValue.trim();
+        if (!trimmedTitle) {
+          new Notice("Meeting title is required.", 5000);
+          return;
+        }
+        this.onSubmit({
+          title: trimmedTitle,
+          manualNotes: this.manualNotesValue.trim(),
+        });
+        this.close();
+      }),
+    );
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+class RecordingTitleModal extends Modal {
+  private readonly onSubmit: (value: RecordingStartMetadata) => void;
+  private titleValue = "";
+
+  constructor(app: App, onSubmit: (value: RecordingStartMetadata) => void) {
+    super(app);
+    this.onSubmit = onSubmit;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Start meeting recording" });
+    contentEl.createEl("p", {
+      text: "This MVP records microphone audio only. Make sure participants know the meeting is being recorded.",
+    });
+
+    new Setting(contentEl)
+      .setName("Meeting title")
+      .setDesc("Used for the meeting note, audio file, and final minutes.")
+      .addText((text) =>
+        text.setPlaceholder("Project sync").onChange((value) => {
+          this.titleValue = value;
+        }),
+      );
+
+    new Setting(contentEl).addButton((button) =>
+      button.setButtonText("Start recording").setCta().onClick(() => {
+        const trimmedTitle = this.titleValue.trim();
+        if (!trimmedTitle) {
+          new Notice("Meeting title is required.", 5000);
+          return;
+        }
+        this.onSubmit({ title: trimmedTitle });
+        this.close();
+      }),
+    );
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
   }
 }
 
@@ -528,6 +1200,50 @@ function isModelsResponsePayload(value: unknown): value is ModelsResponsePayload
 
   const candidate = value as Partial<ModelsResponsePayload>;
   return Array.isArray(candidate.models) && candidate.models.every((item) => typeof item === "string");
+}
+
+function isAudioJobQueuedResponsePayload(value: unknown): value is AudioJobQueuedResponsePayload {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as Partial<AudioJobQueuedResponsePayload>;
+  return typeof candidate.job_id === "string" && candidate.status === "queued";
+}
+
+function isJobStatusResponsePayload(value: unknown): value is JobStatusResponsePayload {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as Partial<JobStatusResponsePayload>;
+  return (
+    typeof candidate.job_id === "string" &&
+    typeof candidate.status === "string" &&
+    typeof candidate.created_at === "string" &&
+    typeof candidate.updated_at === "string" &&
+    (typeof candidate.error === "string" || candidate.error === null)
+  );
+}
+
+function isMeetingGenerateFromJobResponsePayload(value: unknown): value is MeetingGenerateFromJobResponsePayload {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as Partial<MeetingGenerateFromJobResponsePayload>;
+  return (
+    typeof candidate.job_id === "string" &&
+    typeof candidate.model === "string" &&
+    typeof candidate.title === "string" &&
+    typeof candidate.meeting_markdown === "string" &&
+    typeof candidate.usage === "object" &&
+    candidate.usage !== null &&
+    typeof candidate.usage.transcript_chars === "number" &&
+    typeof candidate.usage.manual_notes_chars === "number" &&
+    typeof candidate.usage.template_chars === "number" &&
+    typeof candidate.usage.participants_count === "number"
+  );
 }
 
 function collectMarkdownFiles(file: TAbstractFile): TFile[] {
@@ -564,11 +1280,29 @@ async function ensureFolderExists(app: App, folderPath: string): Promise<void> {
   }
 }
 
+async function createOrReplaceFile(app: App, outputPath: string, contents: string): Promise<TFile> {
+  const existing = app.vault.getAbstractFileByPath(outputPath);
+  if (existing instanceof TFile) {
+    await app.vault.modify(existing, contents);
+    return existing;
+  }
+  return app.vault.create(outputPath, contents);
+}
+
 function formatDate(date: Date): string {
   const year = date.getFullYear();
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
   const day = `${date.getDate()}`.padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function formatDateTimeForFile(date: Date): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  const hours = `${date.getHours()}`.padStart(2, "0");
+  const minutes = `${date.getMinutes()}`.padStart(2, "0");
+  return `${year}-${month}-${day} ${hours}-${minutes}`;
 }
 
 function formatIsoTimestamp(date: Date): string {
@@ -579,7 +1313,7 @@ function sanitizeFileName(input: string): string {
   return input.replace(/[\\/:*?"<>|]/g, "-").trim() || "Untitled";
 }
 
-function buildOutputNote(input: {
+function buildSummaryNote(input: {
   title: string;
   generatedAt: Date;
   model: string;
@@ -598,41 +1332,67 @@ ${input.summaryMarkdown}
 `;
 }
 
-class TemplatePickerModal extends Modal {
-  private readonly choices: TemplateChoice[];
-  private readonly onChoose: (choice: TemplateChoice) => void;
+function buildMeetingSourceNote(input: {
+  title: string;
+  startedAt: Date;
+  recordingStatus: "in progress" | "completed";
+}): string {
+  return `# ${input.title}
 
-  constructor(app: App, choices: TemplateChoice[], onChoose: (choice: TemplateChoice) => void) {
-    super(app);
-    this.choices = choices;
-    this.onChoose = onChoose;
+Date: ${formatIsoTimestamp(input.startedAt)}
+Recording status: ${input.recordingStatus}
+
+## Notes manuelles
+
+`;
+}
+
+function markMeetingSourceNoteCompleted(currentContent: string, audioLink: string): string {
+  const updatedStatus = currentContent.includes("Recording status: in progress")
+    ? currentContent.replace("Recording status: in progress", "Recording status: completed")
+    : `${currentContent.trimEnd()}\nRecording status: completed\n`;
+
+  if (updatedStatus.includes("Audio file:")) {
+    return updatedStatus;
   }
 
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h2", { text: "Choose a template" });
-    contentEl.createEl("p", { text: "Pick the Markdown template to send with this summary request." });
-
-    for (const choice of this.choices) {
-      const setting = new Setting(contentEl).setName(choice.label);
-      if (choice.sourcePath) {
-        setting.setDesc(choice.sourcePath);
-      } else {
-        setting.setDesc("Uses the built-in fallback template.");
-      }
-      setting.addButton((button) =>
-        button.setButtonText("Use template").setCta().onClick(() => {
-          this.onChoose(choice);
-          this.close();
-        }),
-      );
-    }
+  const insertion = `Audio file: [[${audioLink}]]`;
+  const lines = updatedStatus.split("\n");
+  const statusIndex = lines.findIndex((line) => line.startsWith("Recording status:"));
+  if (statusIndex >= 0) {
+    lines.splice(statusIndex + 1, 0, insertion);
+    return `${lines.join("\n").trimEnd()}\n`;
   }
 
-  onClose(): void {
-    this.contentEl.empty();
-  }
+  return `${updatedStatus.trimEnd()}\n${insertion}\n`;
+}
+
+function buildMeetingNote(input: {
+  title: string;
+  generatedAt: Date;
+  model: string;
+  templateLabel: string;
+  jobId: string;
+  audioFileName: string;
+  sourceMeetingLink: string | null;
+  sourceAudioLink: string | null;
+  meetingMarkdown: string;
+}): string {
+  const metadataLines = [
+    `- Generated at: ${formatIsoTimestamp(input.generatedAt)}`,
+    `- Model: ${input.model}`,
+    `- Template: ${input.templateLabel}`,
+    `- Job ID: ${input.jobId}`,
+    input.sourceMeetingLink ? `- Source meeting note: [[${input.sourceMeetingLink}]]` : null,
+    input.sourceAudioLink ? `- Source audio file: [[${input.sourceAudioLink}]]` : `- Source audio file: ${input.audioFileName}`,
+  ].filter((line): line is string => line !== null);
+
+  return `# Meeting Minutes - ${input.title}
+
+${metadataLines.join("\n")}
+
+${input.meetingMarkdown}
+`;
 }
 
 function chooseTemplateWithModal(app: App, choices: TemplateChoice[]): Promise<TemplateChoice> {
@@ -647,10 +1407,112 @@ function chooseTemplateWithModal(app: App, choices: TemplateChoice[]): Promise<T
     modal.onClose = () => {
       originalOnClose();
       if (!resolved) {
-        reject(new UserFacingError("Summary cancelled."));
+        reject(new UserFacingError("Action cancelled."));
       }
     };
 
     modal.open();
   });
+}
+
+function promptForMeetingMetadata(app: App, initialTitle: string): Promise<MeetingMetadata> {
+  return new Promise((resolve, reject) => {
+    let submitted = false;
+    const modal = new MeetingMetadataModal(app, initialTitle, (value) => {
+      submitted = true;
+      resolve(value);
+    });
+
+    const originalOnClose = modal.onClose.bind(modal);
+    modal.onClose = () => {
+      originalOnClose();
+      if (!submitted) {
+        reject(new UserFacingError("Action cancelled."));
+      }
+    };
+    modal.open();
+  });
+}
+
+function promptForRecordingTitle(app: App): Promise<RecordingStartMetadata> {
+  return new Promise((resolve, reject) => {
+    let submitted = false;
+    const modal = new RecordingTitleModal(app, (value) => {
+      submitted = true;
+      resolve(value);
+    });
+
+    const originalOnClose = modal.onClose.bind(modal);
+    modal.onClose = () => {
+      originalOnClose();
+      if (!submitted) {
+        reject(new UserFacingError("Action cancelled."));
+      }
+    };
+    modal.open();
+  });
+}
+
+function pickAudioFile(): Promise<File | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = Array.from(SUPPORTED_AUDIO_EXTENSIONS).join(",");
+    input.onchange = () => {
+      resolve(input.files?.[0] ?? null);
+    };
+    input.click();
+  });
+}
+
+function ensureSupportedAudioFile(fileName: string): void {
+  const extension = getFileExtension(fileName);
+  if (!SUPPORTED_AUDIO_EXTENSIONS.has(extension)) {
+    throw new UserFacingError("Unsupported audio extension. Use .wav, .mp3, .m4a, .webm, or .ogg.");
+  }
+}
+
+function getFileExtension(fileName: string): string {
+  const dotIndex = fileName.lastIndexOf(".");
+  return dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : "";
+}
+
+function stripFileExtension(fileName: string): string {
+  const dotIndex = fileName.lastIndexOf(".");
+  return dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName;
+}
+
+function sleep(durationMs: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, durationMs));
+}
+
+function pickRecordingOptions(): { mimeType: string; fileExtension: string } {
+  const candidates = [
+    { mimeType: "audio/webm;codecs=opus", fileExtension: ".webm" },
+    { mimeType: "audio/webm", fileExtension: ".webm" },
+    { mimeType: "audio/ogg;codecs=opus", fileExtension: ".ogg" },
+    { mimeType: "audio/ogg", fileExtension: ".ogg" },
+    { mimeType: DEFAULT_RECORDING_MIME_TYPE, fileExtension: DEFAULT_RECORDING_EXTENSION },
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof MediaRecorder.isTypeSupported !== "function" || MediaRecorder.isTypeSupported(candidate.mimeType)) {
+      return candidate;
+    }
+  }
+
+  return {
+    mimeType: DEFAULT_RECORDING_MIME_TYPE,
+    fileExtension: DEFAULT_RECORDING_EXTENSION,
+  };
+}
+
+function stopMediaStream(stream: MediaStream): void {
+  for (const track of stream.getTracks()) {
+    track.stop();
+  }
+}
+
+function createFileFromBlob(blob: Blob, name: string, mimeType: string): File {
+  return new File([blob], name, { type: mimeType });
 }

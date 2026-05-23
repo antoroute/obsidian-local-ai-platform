@@ -6,9 +6,10 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app.config import get_settings
 from app.database import get_session_factory
 from app.jobs import JOB_STATUS_COMPLETED
-from app.main import app, get_ollama_client
+from app.main import app, get_llm_client
 from app.models import Job
 from app.services.ollama_client import OllamaChatResult, OllamaUnavailableError
 from app.token_repository import create_api_token
@@ -22,7 +23,24 @@ class FakeMeetingOllamaClient:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
 
-    async def summarize_markdown(self, *, model: str, system_prompt: str, user_prompt: str) -> OllamaChatResult:
+    async def generate_meeting(
+        self,
+        *,
+        model: str,
+        title: str,
+        transcript_chars: int,
+        manual_notes_chars: int,
+        template_chars: int,
+        participants: list[str],
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult:
+        assert model
+        assert title
+        assert transcript_chars >= 0
+        assert manual_notes_chars >= 0
+        assert template_chars > 0
+        assert isinstance(participants, list)
         assert "Never invent facts" in system_prompt
         assert "Manual notes (priority source" in user_prompt
         assert "Transcript (primary source" in user_prompt
@@ -125,7 +143,7 @@ def test_meeting_generate_rejects_missing_scope(client: TestClient) -> None:
 
 
 def test_meeting_generate_accepts_transcript_only(client: TestClient) -> None:
-    app.dependency_overrides[get_ollama_client] = lambda: FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: FakeMeetingOllamaClient()
     token = create_token(["meetings:generate"])
 
     response = client.post(
@@ -141,7 +159,7 @@ def test_meeting_generate_accepts_transcript_only(client: TestClient) -> None:
 
 
 def test_meeting_generate_accepts_manual_notes_only(client: TestClient) -> None:
-    app.dependency_overrides[get_ollama_client] = lambda: FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: FakeMeetingOllamaClient()
     token = create_token(["meetings:generate"])
 
     response = client.post(
@@ -227,7 +245,7 @@ def test_meeting_generate_rejects_too_many_participants(client: TestClient, monk
 
 
 def test_meeting_generate_handles_ollama_unavailable(client: TestClient) -> None:
-    app.dependency_overrides[get_ollama_client] = lambda: FakeMeetingOllamaClient(fail=True)
+    app.dependency_overrides[get_llm_client] = lambda: FakeMeetingOllamaClient(fail=True)
     token = create_token(["meetings:generate"])
 
     response = client.post(
@@ -240,6 +258,28 @@ def test_meeting_generate_handles_ollama_unavailable(client: TestClient) -> None
 
     assert response.status_code == 503
     assert response.json() == {"detail": "The meeting generation backend is currently unavailable."}
+
+
+def test_meeting_generate_fake_provider_returns_deterministic_markdown(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    monkeypatch.setenv("DEFAULT_MODEL", "fake-local-model")
+    monkeypatch.setenv("ALLOWED_MODELS", "fake-local-model,mistral:latest,qwen2.5:14b")
+    get_settings.cache_clear()
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(model="fake-local-model"),
+    )
+
+    get_settings.cache_clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model"] == "fake-local-model"
+    assert "# Compte rendu fake" in payload["meeting_markdown"]
+    assert "workflow Obsidian" in payload["meeting_markdown"]
 
 
 def test_meeting_generate_from_job_requires_token(client: TestClient) -> None:
@@ -261,7 +301,7 @@ def test_meeting_generate_from_job_rejects_missing_scope(client: TestClient) -> 
 
 
 def test_meeting_generate_from_job_accepts_completed_job(client: TestClient) -> None:
-    app.dependency_overrides[get_ollama_client] = lambda: FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: FakeMeetingOllamaClient()
     token = create_token(["meetings:generate"], user_id="user-job-ok")
     job_id = create_completed_audio_job(user_id="user-job-ok", transcript_text="Transcript from job.")
 
@@ -357,7 +397,7 @@ def test_meeting_generate_from_job_rejects_forbidden_model(client: TestClient) -
 
 
 def test_meeting_generate_from_job_handles_ollama_unavailable(client: TestClient) -> None:
-    app.dependency_overrides[get_ollama_client] = lambda: FakeMeetingOllamaClient(fail=True)
+    app.dependency_overrides[get_llm_client] = lambda: FakeMeetingOllamaClient(fail=True)
     token = create_token(["meetings:generate"], user_id="user-job-unavailable")
     job_id = create_completed_audio_job(user_id="user-job-unavailable")
 
@@ -371,3 +411,45 @@ def test_meeting_generate_from_job_handles_ollama_unavailable(client: TestClient
 
     assert response.status_code == 503
     assert response.json() == {"detail": "The meeting generation backend is currently unavailable."}
+
+
+def test_meeting_generate_from_job_fake_provider_accepts_completed_job(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    monkeypatch.setenv("DEFAULT_MODEL", "fake-local-model")
+    monkeypatch.setenv("ALLOWED_MODELS", "fake-local-model,mistral:latest,qwen2.5:14b")
+    get_settings.cache_clear()
+    token = create_token(["meetings:generate"], user_id="user-fake-job-ok")
+    job_id = create_completed_audio_job(user_id="user-fake-job-ok", transcript_text="Transcript from fake job.")
+
+    response = client.post(
+        "/v1/meetings/generate-from-job",
+        headers=create_bearer_header(token),
+        json=valid_generate_from_job_payload(job_id, model="fake-local-model"),
+    )
+
+    get_settings.cache_clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"] == job_id
+    assert payload["model"] == "fake-local-model"
+    assert "# Compte rendu fake" in payload["meeting_markdown"]
+
+
+def test_meeting_generate_from_job_fake_provider_still_rejects_other_user_job(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    monkeypatch.setenv("DEFAULT_MODEL", "fake-local-model")
+    monkeypatch.setenv("ALLOWED_MODELS", "fake-local-model,mistral:latest,qwen2.5:14b")
+    get_settings.cache_clear()
+    token = create_token(["meetings:generate"], user_id="user-fake-a")
+    job_id = create_completed_audio_job(user_id="user-fake-b")
+
+    response = client.post(
+        "/v1/meetings/generate-from-job",
+        headers=create_bearer_header(token),
+        json=valid_generate_from_job_payload(job_id, model="fake-local-model"),
+    )
+
+    get_settings.cache_clear()
+
+    assert response.status_code == 404

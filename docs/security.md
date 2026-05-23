@@ -49,6 +49,7 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - Model usage is constrained by an `ALLOWED_MODELS` allowlist
 - The gateway applies note and template size limits before calling Ollama
 - The gateway must not expose Ollama endpoints for `pull`, `delete`, `create`, or `show`
+- `LLM_PROVIDER=fake` is a development-only runtime mode and must not be used for production AI behavior
 
 ## Current summarization safeguards
 
@@ -70,6 +71,7 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - the gateway should never log full meeting bodies, full transcripts, or manual notes
 - job-backed meeting generation is isolated by `user_id`, so one user cannot generate a meeting report from another user's transcription job
 - internal `input_path` and `result_path` values must never be exposed in API responses
+- fake LLM mode must not bypass authentication, scopes, or job ownership checks
 
 ## Audio upload safeguards
 

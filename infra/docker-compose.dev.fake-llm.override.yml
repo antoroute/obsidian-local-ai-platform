@@ -1,0 +1,24 @@
+services:
+  ai-gateway:
+    depends_on:
+      ollama:
+        condition: service_started
+        required: false
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      LLM_PROVIDER: fake
+      DEFAULT_MODEL: fake-local-model
+      ALLOWED_MODELS: fake-local-model,mistral:latest,qwen2.5:14b
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  whisper-worker:
+    environment:
+      TRANSCRIPTION_ENGINE: fake
+
+  ollama:
+    profiles:
+      - container-ollama

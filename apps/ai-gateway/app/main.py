@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.audio import save_uploaded_audio
@@ -40,6 +41,7 @@ from app.schemas import (
     TranscriptResponse,
     UsageResponse,
 )
+from app.services.llm_client import FakeLlmClient, LlmClient, OllamaLlmClient
 from app.services.ollama_client import OllamaClient, OllamaResponseError, OllamaUnavailableError
 from app.database import get_db_session
 
@@ -53,6 +55,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
+if settings.cors_enabled:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allow_origins,
+        allow_credentials=settings.cors_allow_credentials,
+        allow_methods=settings.cors_allow_methods,
+        allow_headers=settings.cors_allow_headers,
+    )
+
 
 def get_ollama_client() -> OllamaClient:
     current_settings = get_settings()
@@ -60,6 +71,15 @@ def get_ollama_client() -> OllamaClient:
         base_url=current_settings.ollama_base_url,
         timeout_seconds=current_settings.ollama_timeout_seconds,
     )
+
+
+def get_llm_client() -> LlmClient:
+    current_settings = get_settings()
+    if current_settings.llm_provider == "fake":
+        return FakeLlmClient()
+    if current_settings.llm_provider == "ollama":
+        return OllamaLlmClient(get_ollama_client())
+    raise RuntimeError(f"Unsupported LLM_PROVIDER: {current_settings.llm_provider}")
 
 
 @app.get("/v1/health", tags=["system"], response_model=HealthResponse)
@@ -79,14 +99,17 @@ def list_models(
 async def summarize_note(
     payload: NoteSummarizeRequest,
     token: Annotated[ApiToken, Depends(require_scope("notes:summarize"))],
-    ollama_client: Annotated[OllamaClient, Depends(get_ollama_client)],
+    llm_client: Annotated[LlmClient, Depends(get_llm_client)],
 ) -> NoteSummarizeResponse:
     del token
     prepared_request = prepare_summary_request(payload, get_settings())
 
     try:
-        result = await ollama_client.summarize_markdown(
+        result = await llm_client.summarize_note(
             model=prepared_request.selected_model,
+            title=prepared_request.title,
+            note_chars=prepared_request.prompt_chars,
+            template_chars=prepared_request.template_chars,
             system_prompt=prepared_request.system_prompt,
             user_prompt=prepared_request.user_prompt,
         )
@@ -116,14 +139,19 @@ async def summarize_note(
 async def generate_meeting_report(
     payload: MeetingGenerateRequest,
     token: Annotated[ApiToken, Depends(require_scope("meetings:generate"))],
-    ollama_client: Annotated[OllamaClient, Depends(get_ollama_client)],
+    llm_client: Annotated[LlmClient, Depends(get_llm_client)],
 ) -> MeetingGenerateResponse:
     del token
     prepared_request = prepare_meeting_request(payload, get_settings())
 
     try:
-        result = await ollama_client.summarize_markdown(
+        result = await llm_client.generate_meeting(
             model=prepared_request.selected_model,
+            title=prepared_request.title,
+            transcript_chars=prepared_request.transcript_chars,
+            manual_notes_chars=prepared_request.manual_notes_chars,
+            template_chars=prepared_request.template_chars,
+            participants=payload.participants,
             system_prompt=prepared_request.system_prompt,
             user_prompt=prepared_request.user_prompt,
         )
@@ -156,7 +184,7 @@ async def generate_meeting_report_from_job(
     payload: MeetingGenerateFromJobRequest,
     token: Annotated[ApiToken, Depends(require_scope("meetings:generate"))],
     session: Annotated[Session, Depends(get_db_session)],
-    ollama_client: Annotated[OllamaClient, Depends(get_ollama_client)],
+    llm_client: Annotated[LlmClient, Depends(get_llm_client)],
 ) -> MeetingGenerateFromJobResponse:
     job = require_job_for_user(session, job_id=payload.job_id, user_id=token.user_id)
     validate_audio_job_for_meeting(job)
@@ -175,8 +203,13 @@ async def generate_meeting_report_from_job(
     prepared_request = prepare_meeting_from_job_request(payload, transcript=transcript_text, settings=get_settings())
 
     try:
-        result = await ollama_client.summarize_markdown(
+        result = await llm_client.generate_meeting(
             model=prepared_request.selected_model,
+            title=prepared_request.title,
+            transcript_chars=prepared_request.transcript_chars,
+            manual_notes_chars=prepared_request.manual_notes_chars,
+            template_chars=prepared_request.template_chars,
+            participants=payload.participants,
             system_prompt=prepared_request.system_prompt,
             user_prompt=prepared_request.user_prompt,
         )

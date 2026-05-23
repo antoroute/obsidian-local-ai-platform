@@ -1,5 +1,13 @@
 services:
   ai-gateway:
+    depends_on:
+      ollama:
+        condition: service_started
+        required: false
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       OLLAMA_BASE_URL: http://host.docker.internal:11434
       DEFAULT_MODEL: mistral:latest
@@ -10,6 +18,10 @@ services:
       - host_access
     ports:
       - "127.0.0.1:8000:8000"
+
+  ollama:
+    profiles:
+      - container-ollama
 
 networks:
   host_access:
