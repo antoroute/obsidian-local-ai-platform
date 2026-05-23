@@ -16,6 +16,7 @@ from app.jobs import (
     read_transcript_result,
     require_job_for_user,
 )
+from app.meetings import prepare_meeting_request
 from app.notes import prepare_summary_request
 from app.queue import AudioJobQueue, get_audio_job_queue
 from app.schemas import (
@@ -23,6 +24,9 @@ from app.schemas import (
     HealthResponse,
     JobResultResponse,
     JobStatusResponse,
+    MeetingGenerateRequest,
+    MeetingGenerateResponse,
+    MeetingUsageResponse,
     ModelsResponse,
     NoteSummarizeRequest,
     NoteSummarizeResponse,
@@ -97,6 +101,45 @@ async def summarize_note(
         usage=UsageResponse(
             prompt_chars=prepared_request.prompt_chars,
             template_chars=prepared_request.template_chars,
+        ),
+    )
+
+
+@app.post("/v1/meetings/generate", tags=["meetings"], response_model=MeetingGenerateResponse)
+async def generate_meeting_report(
+    payload: MeetingGenerateRequest,
+    token: Annotated[ApiToken, Depends(require_scope("meetings:generate"))],
+    ollama_client: Annotated[OllamaClient, Depends(get_ollama_client)],
+) -> MeetingGenerateResponse:
+    del token
+    prepared_request = prepare_meeting_request(payload, get_settings())
+
+    try:
+        result = await ollama_client.summarize_markdown(
+            model=prepared_request.selected_model,
+            system_prompt=prepared_request.system_prompt,
+            user_prompt=prepared_request.user_prompt,
+        )
+    except OllamaUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The meeting generation backend is currently unavailable.",
+        ) from exc
+    except OllamaResponseError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The meeting generation backend returned an invalid response.",
+        ) from exc
+
+    return MeetingGenerateResponse(
+        model=result.model,
+        title=prepared_request.title,
+        meeting_markdown=result.content,
+        usage=MeetingUsageResponse(
+            transcript_chars=prepared_request.transcript_chars,
+            manual_notes_chars=prepared_request.manual_notes_chars,
+            template_chars=prepared_request.template_chars,
+            participants_count=prepared_request.participants_count,
         ),
     )
 

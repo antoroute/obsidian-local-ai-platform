@@ -58,6 +58,16 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - Oversized notes and templates are rejected before any upstream call
 - The gateway should never log full note contents, raw bearer tokens, or `Authorization` headers
 
+## Meeting generation safeguards
+
+- `POST /v1/meetings/generate` requires the `meetings:generate` scope
+- requested models outside the allowlist are rejected before any Ollama call
+- transcript, manual notes, template size, and participant count are bounded before upstream processing
+- manual notes and transcript are merged with explicit prompt rules to avoid invention
+- manual notes are treated as the priority source for names, acronyms, dates, decisions, and action items
+- the prompt explicitly requires uncertainties and contradictions to be surfaced
+- the gateway should never log full meeting bodies, full transcripts, or manual notes
+
 ## Audio upload safeguards
 
 - `POST /v1/audio/transcribe` requires the `audio:transcribe` scope

@@ -100,11 +100,74 @@ Error behavior:
 
 ## Planned endpoints
 
-- `POST /v1/meetings/generate`
-
 ## Future realtime endpoint
 
 - `WS /v1/live/transcribe`
+
+## Meeting reports
+
+### `POST /v1/meetings/generate`
+
+Protected endpoint that generates a structured Markdown meeting report by combining transcript text, manual notes, a template, and optional participants.
+
+Required authentication:
+
+- `Authorization: Bearer <token>`
+
+Required scope:
+
+- `meetings:generate`
+
+Request payload:
+
+```json
+{
+  "title": "Reunion projet",
+  "transcript": "Texte transcrit ou transcript brut",
+  "manual_notes": "Notes prises manuellement",
+  "participants": ["Antonin", "Alice"],
+  "template": "Template Markdown ou consignes",
+  "model": "qwen2.5:14b"
+}
+```
+
+Behavior:
+
+- requires a non-empty `title`
+- requires a non-empty `template`
+- requires at least one of `transcript` or `manual_notes`
+- uses `DEFAULT_MODEL` when `model` is omitted
+- refuses models not present in `ALLOWED_MODELS`
+- enforces `MAX_TRANSCRIPT_CHARS`, `MAX_MANUAL_NOTES_CHARS`, `MAX_TEMPLATE_CHARS`, and `MAX_PARTICIPANTS`
+- uses manual notes as the priority source for names, acronyms, dates, decisions, and actions
+- uses the transcript as the primary source for chronology and discussion flow
+- instructs the model not to invent, to flag uncertainties, and to identify contradictions between notes and transcript
+
+Example response:
+
+```json
+{
+  "model": "qwen2.5:14b",
+  "title": "Reunion projet",
+  "meeting_markdown": "## Resume executif\n\n...",
+  "usage": {
+    "transcript_chars": 123,
+    "manual_notes_chars": 456,
+    "template_chars": 789,
+    "participants_count": 2
+  }
+}
+```
+
+Error behavior:
+
+- `401 Unauthorized` when the bearer token is missing or invalid
+- `403 Forbidden` when the token lacks `meetings:generate`
+- `403 Forbidden` when the requested model is outside the allowlist
+- `413 Content Too Large` when transcript, manual notes, template, or participants exceed configured limits
+- `422 Unprocessable Entity` when `title` or `template` is empty, or when neither `transcript` nor `manual_notes` is provided
+- `503 Service Unavailable` when Ollama cannot be reached
+- `502 Bad Gateway` when Ollama returns an invalid upstream response
 
 ## Audio jobs
 
