@@ -17,6 +17,9 @@ dependencies = [
 dev = [
   "pytest>=8.0,<9.0",
 ]
+faster-whisper = [
+  "faster-whisper>=1.1,<2.0",
+]
 
 [project.scripts]
 whisper-worker = "whisper_worker.__main__:main"

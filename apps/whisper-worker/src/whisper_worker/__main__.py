@@ -20,14 +20,14 @@ def configure_logging() -> None:
 
 def run_worker_loop() -> None:
     settings = get_settings()
-    engine = create_engine(settings.transcription_mode)
+    engine = create_engine(settings)
     db_engine = create_engine_for_settings(settings)
     Base.metadata.create_all(db_engine)
     session_factory = create_session_factory(db_engine)
     queue = RedisQueueBackend(settings.redis_url, settings.queue_name)
     logger = logging.getLogger("whisper_worker")
 
-    logger.info("Worker started in mode=%s queue=%s", settings.transcription_mode, settings.queue_name)
+    logger.info("Worker started with engine=%s queue=%s", settings.transcription_engine, settings.queue_name)
 
     while True:
         message = queue.pop_audio_job(timeout_seconds=1)

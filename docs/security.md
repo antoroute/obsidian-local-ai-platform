@@ -69,6 +69,9 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - jobs are isolated by token owner through `user_id`
 - Redis remains internal-only and must not be exposed publicly
 - uploaded audio content must never be logged
+- transcription files remain local to the server and are not sent to a third-party cloud service by this pipeline
+- worker logs should avoid printing full transcript bodies when they are large
+- Docker deployments should keep audio artifacts on a shared internal volume such as `audio-storage`, mounted identically in the gateway and worker
 
 ## Required future work
 

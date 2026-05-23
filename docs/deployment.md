@@ -17,6 +17,7 @@ The hardened `docker-compose.yml` now defines:
 - `ollama`, `redis`, `postgres`, and `whisper-worker` connected only to `ai_internal`
 - `proxy` network for public ingress
 - `ai_internal` network with `internal: true` for east-west traffic only
+- named volume `audio-storage` shared by `ai-gateway` and `whisper-worker`
 
 Published host ports:
 
@@ -30,6 +31,12 @@ No host ports are published for:
 - `redis`
 - `postgres`
 - `whisper-worker`
+
+Shared storage:
+
+- `ai-gateway` mounts `audio-storage` at `/data/audio`
+- `whisper-worker` mounts the same `audio-storage` volume at `/data/audio`
+- uploaded audio and transcript result JSON files therefore remain readable across both containers
 
 ## Required host setup
 
@@ -91,6 +98,16 @@ Check that only 80 and 443 are published:
 docker compose ps
 ```
 
+Verify the shared audio volume mounts:
+
+```powershell
+docker compose config
+```
+
+Expected result:
+
+- both `ai-gateway` and `whisper-worker` mount `audio-storage:/data/audio`
+
 Verify the gateway can reach Ollama over the internal network:
 
 ```powershell
@@ -131,6 +148,12 @@ Verify GPU visibility inside the worker container:
 docker compose exec whisper-worker python -c "import os; print(os.getenv('NVIDIA_VISIBLE_DEVICES', 'unset'))"
 ```
 
+Verify `faster-whisper` import inside the worker container:
+
+```powershell
+docker compose exec whisper-worker python -c "import faster_whisper; print('faster-whisper ok')"
+```
+
 ## Healthchecks
 
 Configured healthchecks:
@@ -147,5 +170,42 @@ Configured healthchecks:
 - `AI_GATEWAY_DATABASE_URL` must point to PostgreSQL on the `ai_internal` network
 - `AI_GATEWAY_REDIS_URL` must point to Redis on the `ai_internal` network
 - `AUDIO_STORAGE_DIR` controls where uploaded audio and result JSON files are stored
+- `AUDIO_STORAGE_DIR` should stay `/data/audio` in Docker so the gateway and worker see the same files
 - `MAX_AUDIO_UPLOAD_MB` controls the maximum accepted audio file size
+- `TRANSCRIPTION_ENGINE` selects `fake` or `faster_whisper`
+- `WHISPER_MODEL_SIZE` controls the faster-whisper model size such as `medium` or `large-v3`
+- `WHISPER_DEVICE` controls CPU or CUDA execution
+- `WHISPER_COMPUTE_TYPE` controls inference precision such as `int8`, `float16`, or `int8_float16`
+- `WHISPER_LANGUAGE` can pin the expected language, for example `fr`
+- `WHISPER_BEAM_SIZE` controls beam search width
 - TLS certificate management for public Internet exposure is a later step; Traefik is already positioned as the only public entrypoint
+
+## Recommended worker settings
+
+For CI and fast local tests:
+
+- `TRANSCRIPTION_ENGINE=fake`
+
+For CPU-only local testing with real transcription:
+
+- `TRANSCRIPTION_ENGINE=faster_whisper`
+- `WHISPER_DEVICE=cpu`
+- `WHISPER_MODEL_SIZE=medium`
+- `WHISPER_COMPUTE_TYPE=int8`
+- `WHISPER_LANGUAGE=fr`
+
+For an NVIDIA RTX 3090:
+
+- `TRANSCRIPTION_ENGINE=faster_whisper`
+- `WHISPER_DEVICE=cuda`
+- `WHISPER_COMPUTE_TYPE=float16`
+- `WHISPER_MODEL_SIZE=large-v3` for best quality
+- `WHISPER_MODEL_SIZE=medium` for lower latency and lower VRAM usage
+
+Audio files and transcript results remain local to your self-hosted storage under `AUDIO_STORAGE_DIR`.
+
+## Audio storage hygiene
+
+- uploaded audio files and transcript JSON files must not be committed to git
+- the shared Docker volume is intended for runtime data only
+- future work should add retention, purge, or rotation policies for old audio and transcript artifacts

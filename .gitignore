@@ -37,6 +37,15 @@ apps/obsidian-plugin/main.js
 # Local data
 data/
 tmp/
+uploads/
+audio/
+transcripts/
+storage/
+*.wav
+*.mp3
+*.m4a
+*.webm
+*.ogg
 
 *.db
 *.sqlite
