@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -24,6 +25,10 @@ class CreatedToken:
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def generate_user_id() -> str:
+    return str(uuid.uuid4())
 
 
 def generate_plain_token() -> str:

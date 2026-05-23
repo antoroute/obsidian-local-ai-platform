@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import ApiToken
-from app.security import CreatedToken, create_token_secret, decode_scopes, encode_scopes, utc_now, verify_token_hash
+from app.security import CreatedToken, create_token_secret, decode_scopes, encode_scopes, generate_user_id, utc_now, verify_token_hash
 
 
 def create_api_token(
@@ -12,11 +12,13 @@ def create_api_token(
     *,
     name: str,
     scopes: list[str],
+    user_id: str | None = None,
     expires_at: datetime | None = None,
 ) -> CreatedToken:
     created_token = create_token_secret()
     token_record = ApiToken(
         token_hash=created_token.token_hash,
+        user_id=user_id or generate_user_id(),
         name=name,
         scopes=encode_scopes(scopes),
         created_at=utc_now(),

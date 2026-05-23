@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     ollama_timeout_seconds: int = Field(default=120, alias="OLLAMA_TIMEOUT_SECONDS")
     max_note_chars: int = Field(default=200000, alias="MAX_NOTE_CHARS")
     max_template_chars: int = Field(default=50000, alias="MAX_TEMPLATE_CHARS")
+    redis_url: str = Field(default="redis://redis:6379/0", alias="AI_GATEWAY_REDIS_URL")
+    audio_storage_dir: str = Field(default="./data/audio", alias="AUDIO_STORAGE_DIR")
+    max_audio_upload_mb: int = Field(default=500, alias="MAX_AUDIO_UPLOAD_MB")
+    audio_queue_name: str = Field(default="audio_transcription_jobs", alias="AUDIO_QUEUE_NAME")
 
     @property
     def allowed_models(self) -> list[str]:

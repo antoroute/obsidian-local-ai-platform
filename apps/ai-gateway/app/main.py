@@ -2,15 +2,35 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from sqlalchemy.orm import Session
 
-from app.auth import require_scope
+from app.audio import save_uploaded_audio
+from app.auth import get_current_token, require_scope
 from app.config import get_settings
 from app.database import init_db
 from app.models import ApiToken
+from app.jobs import (
+    JOB_STATUS_COMPLETED,
+    create_audio_transcription_job,
+    read_transcript_result,
+    require_job_for_user,
+)
 from app.notes import prepare_summary_request
-from app.schemas import HealthResponse, ModelsResponse, NoteSummarizeRequest, NoteSummarizeResponse, UsageResponse
+from app.queue import AudioJobQueue, get_audio_job_queue
+from app.schemas import (
+    AudioTranscriptionQueuedResponse,
+    HealthResponse,
+    JobResultResponse,
+    JobStatusResponse,
+    ModelsResponse,
+    NoteSummarizeRequest,
+    NoteSummarizeResponse,
+    TranscriptResponse,
+    UsageResponse,
+)
 from app.services.ollama_client import OllamaClient, OllamaResponseError, OllamaUnavailableError
+from app.database import get_db_session
 
 settings = get_settings()
 
@@ -79,3 +99,47 @@ async def summarize_note(
             template_chars=prepared_request.template_chars,
         ),
     )
+
+
+@app.post("/v1/audio/transcribe", tags=["audio"], response_model=AudioTranscriptionQueuedResponse)
+async def transcribe_audio(
+    file: Annotated[UploadFile, File(...)],
+    token: Annotated[ApiToken, Depends(require_scope("audio:transcribe"))],
+    session: Annotated[Session, Depends(get_db_session)],
+    queue: Annotated[AudioJobQueue, Depends(get_audio_job_queue)],
+) -> AudioTranscriptionQueuedResponse:
+    settings = get_settings()
+    input_path = await save_uploaded_audio(file, settings)
+    job = create_audio_transcription_job(session, user_id=token.user_id, input_path=input_path)
+    queue.enqueue_audio_transcription(job.id)
+    return AudioTranscriptionQueuedResponse(job_id=job.id, status=job.status)
+
+
+@app.get("/v1/jobs/{job_id}", tags=["jobs"], response_model=JobStatusResponse)
+def get_job(
+    job_id: str,
+    token: Annotated[ApiToken, Depends(get_current_token)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JobStatusResponse:
+    job = require_job_for_user(session, job_id=job_id, user_id=token.user_id)
+    return JobStatusResponse(
+        job_id=job.id,
+        status=job.status,
+        created_at=job.created_at.isoformat(),
+        updated_at=job.updated_at.isoformat(),
+        error=job.error,
+    )
+
+
+@app.get("/v1/jobs/{job_id}/result", tags=["jobs"], response_model=JobResultResponse)
+def get_job_result(
+    job_id: str,
+    token: Annotated[ApiToken, Depends(get_current_token)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JobResultResponse:
+    job = require_job_for_user(session, job_id=job_id, user_id=token.user_id)
+    if job.status != JOB_STATUS_COMPLETED:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is not completed.")
+
+    transcript = read_transcript_result(job)
+    return JobResultResponse(job_id=job.id, transcript=TranscriptResponse.model_validate(transcript))

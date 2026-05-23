@@ -1,9 +1,11 @@
 import {
   App,
+  Modal,
   Notice,
   Plugin,
   PluginSettingTab,
   Setting,
+  TAbstractFile,
   TFile,
   normalizePath,
   requestUrl,
@@ -50,6 +52,16 @@ interface SummarizeResponsePayload {
   };
 }
 
+interface ModelsResponsePayload {
+  models: string[];
+}
+
+interface TemplateChoice {
+  label: string;
+  templateContent: string;
+  sourcePath: string | null;
+}
+
 interface PluginSettings {
   apiBaseUrl: string;
   apiToken: string;
@@ -93,29 +105,31 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
   async summarizeCurrentNote(): Promise<void> {
     try {
+      this.validateSummarySettings();
+
       const activeFile = this.app.workspace.getActiveFile();
       if (!activeFile) {
-        throw new Error("Open a note before running the summarization command.");
+        throw new UserFacingError("Open a note before generating a summary.");
       }
 
       const noteContent = await this.app.vault.read(activeFile);
       if (!noteContent.trim()) {
-        throw new Error("The active note is empty.");
+        throw new UserFacingError("The active note is empty.");
       }
 
       const apiBaseUrl = this.getApiBaseUrl();
       const apiToken = this.getApiToken();
-      const templateContent = await this.loadDefaultTemplate();
+      const templateChoice = await this.chooseTemplate();
       const payload: SummarizeRequestPayload = {
         title: activeFile.basename,
         note_content: noteContent,
-        template: templateContent,
-        model: this.settings.defaultModel.trim() || DEFAULT_MODEL,
+        template: templateChoice.templateContent,
+        model: this.getDefaultModel(),
       };
 
       new Notice("Generating AI summary...");
       const result = await this.requestSummary(apiBaseUrl, apiToken, payload);
-      const outputFile = await this.writeSummaryNote(activeFile, result);
+      const outputFile = await this.writeSummaryNote(activeFile, result, templateChoice);
 
       new Notice(`AI summary created: ${outputFile.path}`);
     } catch (error) {
@@ -127,7 +141,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
   getApiBaseUrl(): string {
     const value = this.settings.apiBaseUrl.trim().replace(/\/+$/, "");
     if (!value) {
-      throw new Error("Set the AI Gateway API Base URL in the plugin settings before summarizing notes.");
+      throw new UserFacingError("Missing API Base URL.");
     }
     return value;
   }
@@ -135,51 +149,156 @@ export default class LocalAiPlatformPlugin extends Plugin {
   getApiToken(): string {
     const value = this.settings.apiToken.trim();
     if (!value) {
-      throw new Error("Set the AI Gateway API token in the plugin settings before summarizing notes.");
+      throw new UserFacingError("Missing API token.");
     }
     return value;
   }
 
-  async loadDefaultTemplate(): Promise<string> {
-    const templatesFolder = this.settings.templatesFolder.trim();
-    if (!templatesFolder) {
-      return FALLBACK_TEMPLATE;
+  getDefaultModel(): string {
+    const value = this.settings.defaultModel.trim();
+    if (!value) {
+      throw new UserFacingError("Missing default model.");
     }
-
-    const templatePath = normalizePath(`${templatesFolder}/${DEFAULT_TEMPLATE_FILE}`);
-    const templateFile = this.app.vault.getAbstractFileByPath(templatePath);
-    if (templateFile instanceof TFile) {
-      const content = await this.app.vault.read(templateFile);
-      return content.trim() ? content : FALLBACK_TEMPLATE;
-    }
-
-    return FALLBACK_TEMPLATE;
+    return value;
   }
 
-  async requestSummary(
-    apiBaseUrl: string,
-    apiToken: string,
-    payload: SummarizeRequestPayload,
-  ): Promise<SummarizeResponsePayload> {
+  getOutputFolder(): string {
+    const value = this.settings.outputFolder.trim();
+    if (!value) {
+      throw new UserFacingError("Missing output folder.");
+    }
+    return normalizePath(value);
+  }
+
+  validateSummarySettings(): void {
+    this.getApiBaseUrl();
+    this.getApiToken();
+    this.getDefaultModel();
+    this.getOutputFolder();
+  }
+
+  async chooseTemplate(): Promise<TemplateChoice> {
+    const availableTemplates = await this.listTemplateChoices();
+    if (availableTemplates.length === 0) {
+      return {
+        label: "Built-in default template",
+        templateContent: FALLBACK_TEMPLATE,
+        sourcePath: null,
+      };
+    }
+
+    return chooseTemplateWithModal(this.app, availableTemplates);
+  }
+
+  async listTemplateChoices(): Promise<TemplateChoice[]> {
+    const choices: TemplateChoice[] = [
+      {
+        label: "Built-in default template",
+        templateContent: FALLBACK_TEMPLATE,
+        sourcePath: null,
+      },
+    ];
+    const templatesFolder = this.settings.templatesFolder.trim();
+    if (!templatesFolder) {
+      return choices;
+    }
+
+    const folder = this.app.vault.getAbstractFileByPath(normalizePath(templatesFolder));
+    if (!folder) {
+      return choices;
+    }
+
+    const markdownFiles = collectMarkdownFiles(folder).sort((left, right) => left.path.localeCompare(right.path));
+    for (const file of markdownFiles) {
+      const content = await this.app.vault.read(file);
+      choices.push({
+        label: file.basename,
+        templateContent: content.trim() ? content : FALLBACK_TEMPLATE,
+        sourcePath: file.path,
+      });
+    }
+
+    return choices;
+  }
+
+  async testConnection(): Promise<void> {
+    try {
+      const apiBaseUrl = this.getApiBaseUrl();
+      const apiToken = this.getApiToken();
+      new Notice("Testing AI Gateway connection...");
+
+      const responseText = await this.performRequest({
+        apiBaseUrl,
+        apiToken,
+        path: "/v1/models",
+        method: "GET",
+        errorMap: {
+          401: "The API token is invalid or expired.",
+          403: "The token is missing the models:list scope.",
+        },
+        unavailableMessage: "The AI Gateway is unavailable.",
+        invalidJsonMessage: "The AI Gateway returned an invalid models response.",
+      });
+
+      const payload = this.parseModelsResponse(responseText);
+      new Notice(`Connection successful. Models: ${payload.models.join(", ")}`, 8000);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Connection test failed.";
+      new Notice(message, 8000);
+    }
+  }
+
+  async requestSummary(apiBaseUrl: string, apiToken: string, payload: SummarizeRequestPayload): Promise<SummarizeResponsePayload> {
+    const responseText = await this.performRequest({
+      apiBaseUrl,
+      apiToken,
+      path: "/v1/notes/summarize",
+      method: "POST",
+      body: JSON.stringify(payload),
+      errorMap: {
+        401: "The API token is invalid or expired.",
+        403: "The token is missing notes:summarize or the model is not allowed.",
+        413: "The note or template is too large for the AI Gateway limits.",
+        422: "The AI Gateway rejected this note as invalid.",
+        502: "The AI Gateway returned an invalid upstream response.",
+        503: "The AI Gateway summarization service is unavailable.",
+      },
+      unavailableMessage: "The AI Gateway is unreachable.",
+      invalidJsonMessage: "The AI Gateway returned an invalid JSON response.",
+    });
+
+    return this.parseSummaryResponse(responseText);
+  }
+
+  async performRequest(input: {
+    apiBaseUrl: string;
+    apiToken: string;
+    path: string;
+    method: "GET" | "POST";
+    body?: string;
+    errorMap: Record<number, string>;
+    unavailableMessage: string;
+    invalidJsonMessage: string;
+  }): Promise<string> {
     let responseText = "";
 
     try {
       const response = await requestUrl({
-        url: `${apiBaseUrl}/v1/notes/summarize`,
-        method: "POST",
+        url: `${input.apiBaseUrl}${input.path}`,
+        method: input.method,
         headers: {
-          Authorization: `Bearer ${apiToken}`,
+          Authorization: `Bearer ${input.apiToken}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(payload),
+        body: input.body,
       });
 
       responseText = response.text;
       if (response.status >= 400) {
-        this.throwApiError(response.status, responseText);
+        this.throwApiError(response.status, responseText, input.errorMap);
       }
 
-      return this.parseSummaryResponse(responseText);
+      return responseText;
     } catch (error) {
       if (error instanceof UserFacingError) {
         throw error;
@@ -187,7 +306,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
       if (error instanceof Error && error.message) {
         if (error.message.includes("ECONNREFUSED") || error.message.includes("ENOTFOUND")) {
-          throw new UserFacingError("The AI Gateway is unreachable. Check the API Base URL and server availability.");
+          throw new UserFacingError(`${input.unavailableMessage} Check the API Base URL and server availability.`);
         }
 
         if (error.message.includes("Certificate") || error.message.includes("SSL")) {
@@ -195,48 +314,26 @@ export default class LocalAiPlatformPlugin extends Plugin {
         }
 
         if (error.message.includes("Unexpected token") || error.message.includes("JSON")) {
-          throw new UserFacingError("The AI Gateway returned an invalid JSON response.");
+          throw new UserFacingError(input.invalidJsonMessage);
         }
       }
 
       if (typeof error === "object" && error !== null) {
-        throw new UserFacingError("The AI Gateway request failed before a valid response was received.");
+        throw new UserFacingError(`${input.unavailableMessage} The request failed before a valid response was received.`);
       }
 
       throw error;
     }
   }
 
-  throwApiError(status: number, responseText: string): never {
+  throwApiError(status: number, responseText: string, errorMap: Record<number, string>): never {
     const detail = this.extractErrorDetail(responseText);
-
-    if (status === 401) {
-      throw new UserFacingError("The API token is invalid, expired, or missing the Bearer format expected by the AI Gateway.");
+    const mappedMessage = errorMap[status];
+    if (mappedMessage) {
+      throw new UserFacingError(mappedMessage);
     }
 
-    if (status === 403) {
-      if (detail.includes("notes:summarize")) {
-        throw new UserFacingError("The configured token does not have the notes:summarize scope.");
-      }
-      if (detail.includes("model")) {
-        throw new UserFacingError("The selected model is not allowed by the AI Gateway.");
-      }
-      throw new UserFacingError("The AI Gateway refused this request.");
-    }
-
-    if (status === 413) {
-      throw new UserFacingError("The note or template is too large for the AI Gateway limits.");
-    }
-
-    if (status === 422) {
-      throw new UserFacingError(detail || "The AI Gateway rejected the note payload as invalid.");
-    }
-
-    if (status === 502 || status === 503) {
-      throw new UserFacingError("The AI Gateway summarization service is currently unavailable.");
-    }
-
-    throw new UserFacingError(`HTTP ${status}: ${detail || "The AI Gateway returned an unexpected error."}`);
+    throw new UserFacingError(detail || `HTTP ${status}: The AI Gateway returned an unexpected error.`);
   }
 
   extractErrorDetail(responseText: string): string {
@@ -263,8 +360,27 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return parsed;
   }
 
-  async writeSummaryNote(sourceFile: TFile, response: SummarizeResponsePayload): Promise<TFile> {
-    const outputFolder = normalizePath(this.settings.outputFolder.trim() || DEFAULT_OUTPUT_FOLDER);
+  parseModelsResponse(responseText: string): ModelsResponsePayload {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(responseText);
+    } catch {
+      throw new UserFacingError("The AI Gateway returned an invalid models response.");
+    }
+
+    if (!isModelsResponsePayload(parsed)) {
+      throw new UserFacingError("The AI Gateway returned an invalid models response.");
+    }
+
+    return parsed;
+  }
+
+  async writeSummaryNote(
+    sourceFile: TFile,
+    response: SummarizeResponsePayload,
+    templateChoice: TemplateChoice,
+  ): Promise<TFile> {
+    const outputFolder = this.getOutputFolder();
     await ensureFolderExists(this.app, outputFolder);
 
     const date = formatDate(new Date());
@@ -275,6 +391,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       title: response.title || sourceFile.basename,
       sourceLink,
       model: response.model,
+      templateLabel: templateChoice.label,
       summaryMarkdown: response.summary_markdown,
       generatedAt: new Date(),
     });
@@ -338,6 +455,15 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Test connection")
+      .setDesc("Calls GET /v1/models with the configured token.")
+      .addButton((button) =>
+        button.setButtonText("Test connection").onClick(async () => {
+          await this.plugin.testConnection();
+        }),
+      );
+
+    new Setting(containerEl)
       .setName("Default model")
       .setDesc("Sent to POST /v1/notes/summarize. Leave the gateway allowlist in sync.")
       .addText((text) =>
@@ -395,6 +521,27 @@ function isSummarizeResponsePayload(value: unknown): value is SummarizeResponseP
   );
 }
 
+function isModelsResponsePayload(value: unknown): value is ModelsResponsePayload {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as Partial<ModelsResponsePayload>;
+  return Array.isArray(candidate.models) && candidate.models.every((item) => typeof item === "string");
+}
+
+function collectMarkdownFiles(file: TAbstractFile): TFile[] {
+  if (file instanceof TFile) {
+    return file.extension === "md" ? [file] : [];
+  }
+
+  if ("children" in file && Array.isArray(file.children)) {
+    return file.children.flatMap((child: TAbstractFile) => collectMarkdownFiles(child));
+  }
+
+  return [];
+}
+
 async function ensureFolderExists(app: App, folderPath: string): Promise<void> {
   const normalized = normalizePath(folderPath);
   if (!normalized || normalized === "/") {
@@ -437,14 +584,73 @@ function buildOutputNote(input: {
   generatedAt: Date;
   model: string;
   sourceLink: string;
+  templateLabel: string;
   summaryMarkdown: string;
 }): string {
   return `# AI Summary - ${input.title}
 
 - Generated at: ${formatIsoTimestamp(input.generatedAt)}
 - Model: ${input.model}
+- Template: ${input.templateLabel}
 - Source note: [[${input.sourceLink}]]
 
 ${input.summaryMarkdown}
 `;
+}
+
+class TemplatePickerModal extends Modal {
+  private readonly choices: TemplateChoice[];
+  private readonly onChoose: (choice: TemplateChoice) => void;
+
+  constructor(app: App, choices: TemplateChoice[], onChoose: (choice: TemplateChoice) => void) {
+    super(app);
+    this.choices = choices;
+    this.onChoose = onChoose;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Choose a template" });
+    contentEl.createEl("p", { text: "Pick the Markdown template to send with this summary request." });
+
+    for (const choice of this.choices) {
+      const setting = new Setting(contentEl).setName(choice.label);
+      if (choice.sourcePath) {
+        setting.setDesc(choice.sourcePath);
+      } else {
+        setting.setDesc("Uses the built-in fallback template.");
+      }
+      setting.addButton((button) =>
+        button.setButtonText("Use template").setCta().onClick(() => {
+          this.onChoose(choice);
+          this.close();
+        }),
+      );
+    }
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+function chooseTemplateWithModal(app: App, choices: TemplateChoice[]): Promise<TemplateChoice> {
+  return new Promise((resolve, reject) => {
+    let resolved = false;
+    const modal = new TemplatePickerModal(app, choices, (choice) => {
+      resolved = true;
+      resolve(choice);
+    });
+
+    const originalOnClose = modal.onClose.bind(modal);
+    modal.onClose = () => {
+      originalOnClose();
+      if (!resolved) {
+        reject(new UserFacingError("Summary cancelled."));
+      }
+    };
+
+    modal.open();
+  });
 }

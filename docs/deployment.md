@@ -146,4 +146,6 @@ Configured healthchecks:
 - `OLLAMA_BASE_URL` must stay `http://ollama:11434` inside Docker
 - `AI_GATEWAY_DATABASE_URL` must point to PostgreSQL on the `ai_internal` network
 - `AI_GATEWAY_REDIS_URL` must point to Redis on the `ai_internal` network
+- `AUDIO_STORAGE_DIR` controls where uploaded audio and result JSON files are stored
+- `MAX_AUDIO_UPLOAD_MB` controls the maximum accepted audio file size
 - TLS certificate management for public Internet exposure is a later step; Traefik is already positioned as the only public entrypoint

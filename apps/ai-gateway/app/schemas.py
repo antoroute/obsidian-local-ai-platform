@@ -26,3 +26,34 @@ class NoteSummarizeResponse(BaseModel):
     title: str
     summary_markdown: str
     usage: UsageResponse
+
+
+class AudioTranscriptionQueuedResponse(BaseModel):
+    job_id: str
+    status: str
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    created_at: str
+    updated_at: str
+    error: str | None
+
+
+class TranscriptSegmentResponse(BaseModel):
+    start: float
+    end: float
+    text: str
+
+
+class TranscriptResponse(BaseModel):
+    text: str
+    language: str
+    duration: float
+    segments: list[TranscriptSegmentResponse]
+
+
+class JobResultResponse(BaseModel):
+    job_id: str
+    transcript: TranscriptResponse

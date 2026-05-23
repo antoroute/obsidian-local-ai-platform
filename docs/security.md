@@ -58,6 +58,18 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - Oversized notes and templates are rejected before any upstream call
 - The gateway should never log full note contents, raw bearer tokens, or `Authorization` headers
 
+## Audio upload safeguards
+
+- `POST /v1/audio/transcribe` requires the `audio:transcribe` scope
+- only `.wav`, `.mp3`, `.m4a`, `.webm`, and `.ogg` uploads are accepted
+- audio uploads are bounded by `MAX_AUDIO_UPLOAD_MB`
+- uploaded files are stored with generated internal filenames
+- original filenames must not be used as storage paths
+- absolute filesystem paths are never returned in API responses
+- jobs are isolated by token owner through `user_id`
+- Redis remains internal-only and must not be exposed publicly
+- uploaded audio content must never be logged
+
 ## Required future work
 
 - Per-user authorization and quotas

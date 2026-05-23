@@ -33,7 +33,8 @@ def get_db_session() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    from app.models import ApiToken
+    from app.models import ApiToken, Job
 
     del ApiToken
+    del Job
     Base.metadata.create_all(bind=get_engine())
