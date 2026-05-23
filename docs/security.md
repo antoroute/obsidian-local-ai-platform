@@ -61,12 +61,15 @@ The raw token is shown only once by the CLI at creation time and must not be log
 ## Meeting generation safeguards
 
 - `POST /v1/meetings/generate` requires the `meetings:generate` scope
+- `POST /v1/meetings/generate-from-job` also requires the `meetings:generate` scope
 - requested models outside the allowlist are rejected before any Ollama call
 - transcript, manual notes, template size, and participant count are bounded before upstream processing
 - manual notes and transcript are merged with explicit prompt rules to avoid invention
 - manual notes are treated as the priority source for names, acronyms, dates, decisions, and action items
 - the prompt explicitly requires uncertainties and contradictions to be surfaced
 - the gateway should never log full meeting bodies, full transcripts, or manual notes
+- job-backed meeting generation is isolated by `user_id`, so one user cannot generate a meeting report from another user's transcription job
+- internal `input_path` and `result_path` values must never be exposed in API responses
 
 ## Audio upload safeguards
 

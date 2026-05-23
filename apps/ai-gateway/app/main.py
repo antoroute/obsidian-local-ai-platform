@@ -16,7 +16,12 @@ from app.jobs import (
     read_transcript_result,
     require_job_for_user,
 )
-from app.meetings import prepare_meeting_request
+from app.meetings import (
+    extract_transcript_text_from_result,
+    prepare_meeting_from_job_request,
+    prepare_meeting_request,
+    validate_audio_job_for_meeting,
+)
 from app.notes import prepare_summary_request
 from app.queue import AudioJobQueue, get_audio_job_queue
 from app.schemas import (
@@ -24,6 +29,8 @@ from app.schemas import (
     HealthResponse,
     JobResultResponse,
     JobStatusResponse,
+    MeetingGenerateFromJobRequest,
+    MeetingGenerateFromJobResponse,
     MeetingGenerateRequest,
     MeetingGenerateResponse,
     MeetingUsageResponse,
@@ -132,6 +139,60 @@ async def generate_meeting_report(
         ) from exc
 
     return MeetingGenerateResponse(
+        model=result.model,
+        title=prepared_request.title,
+        meeting_markdown=result.content,
+        usage=MeetingUsageResponse(
+            transcript_chars=prepared_request.transcript_chars,
+            manual_notes_chars=prepared_request.manual_notes_chars,
+            template_chars=prepared_request.template_chars,
+            participants_count=prepared_request.participants_count,
+        ),
+    )
+
+
+@app.post("/v1/meetings/generate-from-job", tags=["meetings"], response_model=MeetingGenerateFromJobResponse)
+async def generate_meeting_report_from_job(
+    payload: MeetingGenerateFromJobRequest,
+    token: Annotated[ApiToken, Depends(require_scope("meetings:generate"))],
+    session: Annotated[Session, Depends(get_db_session)],
+    ollama_client: Annotated[OllamaClient, Depends(get_ollama_client)],
+) -> MeetingGenerateFromJobResponse:
+    job = require_job_for_user(session, job_id=payload.job_id, user_id=token.user_id)
+    validate_audio_job_for_meeting(job)
+
+    try:
+        transcript_payload = read_transcript_result(job)
+        transcript_text = extract_transcript_text_from_result(transcript_payload)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Stored transcript result is invalid.",
+        ) from exc
+
+    prepared_request = prepare_meeting_from_job_request(payload, transcript=transcript_text, settings=get_settings())
+
+    try:
+        result = await ollama_client.summarize_markdown(
+            model=prepared_request.selected_model,
+            system_prompt=prepared_request.system_prompt,
+            user_prompt=prepared_request.user_prompt,
+        )
+    except OllamaUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The meeting generation backend is currently unavailable.",
+        ) from exc
+    except OllamaResponseError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The meeting generation backend returned an invalid response.",
+        ) from exc
+
+    return MeetingGenerateFromJobResponse(
+        job_id=job.id,
         model=result.model,
         title=prepared_request.title,
         meeting_markdown=result.content,

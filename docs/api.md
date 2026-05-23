@@ -169,6 +169,67 @@ Error behavior:
 - `503 Service Unavailable` when Ollama cannot be reached
 - `502 Bad Gateway` when Ollama returns an invalid upstream response
 
+### `POST /v1/meetings/generate-from-job`
+
+Protected endpoint that generates a structured meeting report directly from a completed audio transcription job, without requiring the client to fetch the transcript first.
+
+Required authentication:
+
+- `Authorization: Bearer <token>`
+
+Required scope:
+
+- `meetings:generate`
+
+Request payload:
+
+```json
+{
+  "job_id": "uuid ou identifiant job",
+  "title": "Reunion projet",
+  "manual_notes": "Notes prises manuellement",
+  "participants": ["Antonin", "Alice"],
+  "template": "Template Markdown ou consignes",
+  "model": "qwen2.5:14b"
+}
+```
+
+Behavior:
+
+- loads the transcript from a completed `audio_transcription` job owned by the current token user
+- refuses jobs from other users
+- refuses queued, processing, or failed jobs
+- reuses the same meeting-generation rules as `POST /v1/meetings/generate`
+- never exposes internal storage paths in the response
+
+Example response:
+
+```json
+{
+  "job_id": "1f79508f-8e0d-4c68-b6f8-8f7b891bcb2f",
+  "model": "qwen2.5:14b",
+  "title": "Reunion projet",
+  "meeting_markdown": "## Resume executif\n\n...",
+  "usage": {
+    "transcript_chars": 123,
+    "manual_notes_chars": 456,
+    "template_chars": 789,
+    "participants_count": 2
+  }
+}
+```
+
+Error behavior:
+
+- `401 Unauthorized` when the bearer token is missing or invalid
+- `403 Forbidden` when the token lacks `meetings:generate`
+- `404 Not Found` when the job does not exist or is not owned by the current token user
+- `409 Conflict` when the job is not completed, failed, or incompatible with meeting generation
+- `500 Internal Server Error` when the stored transcript result is invalid
+- `403 Forbidden` when the requested model is outside the allowlist
+- `503 Service Unavailable` when Ollama cannot be reached
+- `502 Bad Gateway` when Ollama returns an invalid upstream response
+
 ## Audio jobs
 
 ### `POST /v1/audio/transcribe`
@@ -274,3 +335,9 @@ Example response:
 - API tokens use the `obsai_live_<random_secret>` format
 - Only token hashes are stored server-side
 - Ollama is accessed only through controlled gateway endpoints, never through a generic proxy
+
+## Typical audio-to-meeting workflow
+
+1. `POST /v1/audio/transcribe`
+2. poll `GET /v1/jobs/{job_id}` until `status=completed`
+3. `POST /v1/meetings/generate-from-job` with the finished `job_id`, template, and optional manual notes

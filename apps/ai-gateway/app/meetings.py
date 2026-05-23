@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from fastapi import HTTPException, status
 
 from app.config import Settings
-from app.schemas import MeetingGenerateRequest
+from app.jobs import JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_PROCESSING, JOB_STATUS_QUEUED, JOB_TYPE_AUDIO_TRANSCRIPTION
+from app.models import Job
+from app.schemas import MeetingGenerateFromJobRequest, MeetingGenerateRequest
 
 MEETING_SYSTEM_PROMPT = """You are a careful assistant that produces structured Markdown meeting reports.
 Use the transcript as the primary source for meeting flow and chronology.
@@ -29,11 +31,49 @@ class PreparedMeetingRequest:
 
 
 def prepare_meeting_request(payload: MeetingGenerateRequest, settings: Settings) -> PreparedMeetingRequest:
-    title = payload.title.strip()
-    template = payload.template.strip()
-    transcript = (payload.transcript or "").strip()
-    manual_notes = (payload.manual_notes or "").strip()
-    participants = [participant.strip() for participant in payload.participants if participant.strip()]
+    return prepare_meeting_inputs(
+        title=payload.title,
+        transcript=payload.transcript,
+        manual_notes=payload.manual_notes,
+        participants=payload.participants,
+        template=payload.template,
+        model=payload.model,
+        settings=settings,
+    )
+
+
+def prepare_meeting_from_job_request(
+    payload: MeetingGenerateFromJobRequest,
+    *,
+    transcript: str,
+    settings: Settings,
+) -> PreparedMeetingRequest:
+    return prepare_meeting_inputs(
+        title=payload.title,
+        transcript=transcript,
+        manual_notes=payload.manual_notes,
+        participants=payload.participants,
+        template=payload.template,
+        model=payload.model,
+        settings=settings,
+    )
+
+
+def prepare_meeting_inputs(
+    *,
+    title: str,
+    transcript: str | None,
+    manual_notes: str | None,
+    participants: list[str],
+    template: str,
+    model: str | None,
+    settings: Settings,
+) -> PreparedMeetingRequest:
+    title = title.strip()
+    template = template.strip()
+    transcript = (transcript or "").strip()
+    manual_notes = (manual_notes or "").strip()
+    participants = [participant.strip() for participant in participants if participant.strip()]
 
     if not title:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="title must not be empty.")
@@ -65,7 +105,7 @@ def prepare_meeting_request(payload: MeetingGenerateRequest, settings: Settings)
             detail=f"participants exceeds the maximum of {settings.max_participants} entries.",
         )
 
-    selected_model = payload.model or settings.default_model
+    selected_model = model or settings.default_model
     if selected_model not in settings.allowed_models:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Requested model is not allowed.")
 
@@ -85,6 +125,33 @@ def prepare_meeting_request(payload: MeetingGenerateRequest, settings: Settings)
         template_chars=len(template),
         participants_count=len(participants),
     )
+
+
+def extract_transcript_text_from_result(result_payload: dict[str, object]) -> str:
+    transcript = result_payload.get("text")
+    if not isinstance(transcript, str):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Stored transcript result is invalid.",
+        )
+    transcript = transcript.strip()
+    if not transcript:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Stored transcript result is empty.",
+        )
+    return transcript
+
+
+def validate_audio_job_for_meeting(job: Job) -> None:
+    if job.type != JOB_TYPE_AUDIO_TRANSCRIPTION:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job type is not compatible with meeting generation.")
+    if job.status in {JOB_STATUS_QUEUED, JOB_STATUS_PROCESSING}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is not completed.")
+    if job.status == JOB_STATUS_FAILED:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job failed and cannot be used for meeting generation.")
+    if job.status != JOB_STATUS_COMPLETED:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is not completed.")
 
 
 def build_meeting_user_prompt(

@@ -37,6 +37,15 @@ class MeetingGenerateRequest(BaseModel):
     model: str | None = None
 
 
+class MeetingGenerateFromJobRequest(BaseModel):
+    job_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    manual_notes: str | None = None
+    participants: list[str] = Field(default_factory=list)
+    template: str = Field(min_length=1)
+    model: str | None = None
+
+
 class MeetingUsageResponse(BaseModel):
     transcript_chars: int
     manual_notes_chars: int
@@ -45,6 +54,14 @@ class MeetingUsageResponse(BaseModel):
 
 
 class MeetingGenerateResponse(BaseModel):
+    model: str
+    title: str
+    meeting_markdown: str
+    usage: MeetingUsageResponse
+
+
+class MeetingGenerateFromJobResponse(BaseModel):
+    job_id: str
     model: str
     title: str
     meeting_markdown: str
