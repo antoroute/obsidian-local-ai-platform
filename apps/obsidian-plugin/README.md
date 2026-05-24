@@ -35,8 +35,9 @@ Configure these settings in Obsidian:
 - `Transcription language`
 - `Output language`
 - `Preferred template language`
-- `Recording source`
-- `Audio input device`
+- `Mode d'enregistrement`
+- `Microphone`
+- `Son ordinateur`
 
 Required API scopes:
 
@@ -126,35 +127,45 @@ Example templates are available in `apps/obsidian-plugin/examples/templates`, in
 
 ## Audio For Teams / Video Calls
 
-`Recording source` has three modes:
+`Mode d'enregistrement` has four modes:
 
-- `Micro seul`: uses the device selected in `Audio input device`; recommended for standard use
-- `Entree audio selectionnee`: uses exactly the selected `Audio input device`; useful if Windows exposes `Mixage stereo`, `Stereo Mix`, `What U Hear`, `Loopback`, or `Monitor`
+- `Micro seul`: uses the device selected in `Microphone`; recommended for standard use
+- `Son ordinateur seul`: records only the device selected in `Son ordinateur`, usually `Mixage stereo`, `Stereo Mix`, `What U Hear`, `Loopback`, or `Monitor`
+- `Micro + son ordinateur`: records `Microphone` and `Son ordinateur` in parallel, then mixes both streams in the plugin with the Web Audio API
 - `Capture systeme experimentale`: tries direct system capture through Obsidian/Electron; not recommended by default and may not work
 
-### Sans logiciel supplementaire
+### Micro + son ordinateur sans logiciel externe
 
-Without external software, Note Compagnon can record only audio inputs that Windows exposes like microphones. To record other Teams participants without installing anything else, first check whether Windows exposes `Mixage stereo` / `Stereo Mix`.
+Note Compagnon can mix two normal Windows audio inputs without external software:
+
+- the physical microphone provides your voice
+- `Mixage stereo` / `Stereo Mix` provides the computer audio when the audio driver exposes it
+- the plugin mixes both streams internally; you do not need to enable `Listen to this device` in Windows
+- do not try to select a speaker/output directly; Obsidian can only record audio inputs exposed by Windows
 
 1. Open `Windows Settings > System > Sound`.
 2. Open `More sound settings`.
 3. Go to the `Recording` tab.
 4. Right-click and enable `Show Disabled Devices`.
 5. Enable `Mixage stereo` / `Stereo Mix` if it exists.
-6. Return to Note Compagnon.
-7. Click `Refresh audio devices`.
-8. Select `Mixage stereo` / `Stereo Mix` in `Audio input device`.
-9. Click `Test audio input`.
-10. Play sound on the computer to verify that audio is detected.
+6. Verify that the `Mixage stereo` level meter moves when a video or system sound plays.
+7. Return to Note Compagnon.
+8. Click `Actualiser les peripheriques`.
+9. Set `Microphone` to your physical microphone.
+10. Set `Son ordinateur` to `Mixage stereo` / `Stereo Mix`.
+11. Click `Tester le micro`.
+12. Click `Tester le son ordinateur` while playing sound on the computer.
+13. Set `Mode d'enregistrement` to `Micro + son ordinateur`.
 
-Some audio drivers do not provide `Mixage stereo` / `Stereo Mix`. In that case, Obsidian alone probably cannot capture global computer audio.
+Some PCs expose `Mixage stereo` only for the built-in analog/Realtek output, and not for USB, Bluetooth, HDMI, or external sound cards. If `Mixage stereo` receives no sound, this usually comes from the audio driver or the selected Windows output.
 
 Settings-only audio tools:
 
-- `Refresh audio devices`: asks microphone permission if needed, then lists available audio inputs
-- `Test audio input`: listens for a few seconds, detects whether sound is present, then stops all tracks without saving audio
+- `Actualiser les peripheriques`: asks microphone permission if needed, then lists available audio inputs
+- `Tester le micro`: listens to the selected microphone for a few seconds, detects whether sound is present, then stops all tracks without saving audio
+- `Tester le son ordinateur`: listens to the selected computer-audio input for a few seconds; play a sound during the test
 
-`Refresh audio devices` also looks for labels such as `Mixage stereo`, `Stereo Mix`, `What U Hear`, `Loopback`, and `Monitor`. If one is found, the plugin suggests selecting it. If none is found, it shows a short Windows-oriented hint.
+`Actualiser les peripheriques` also looks for labels such as `Mixage stereo`, `Stereo Mix`, `What U Hear`, `Loopback`, `Monitor`, and `Mix`. If one is found, the plugin suggests selecting it as `Son ordinateur` and displays it with `(recommande)`. If none is found, it shows a short Windows-oriented hint.
 
 ### Capture systeme experimentale
 
@@ -226,12 +237,14 @@ The final note should contain the polished minutes only. It should not include t
 14. Verify an assistant answer with headings, lists, and paragraphs renders as readable Markdown.
 15. Verify assistant `Inserer` / `Copier` appear only after a real answer.
 16. Verify detailed templates and status blocks are collapsible.
-17. Select an audio input device in settings and run `Test audio input`.
+17. Select `Microphone` and `Son ordinateur`, then run `Tester le micro` and `Tester le son ordinateur`.
 18. Record with `Micro seul`.
-19. Record with `Entree audio selectionnee` using the selected device.
-20. Try `Capture systeme experimentale`: if Obsidian/Electron provides no audio track, it fails clearly without creating a silent recording.
-21. Verify `recording_source_requested`, `recording_source_used`, and `audio_input_device_label` are written in the meeting note.
-22. Generate an AI Summary and verify there is no global Markdown code block, no raw transcript, and no internal prompt/source labels.
+19. Record with `Son ordinateur seul` using `Mixage stereo` / `Stereo Mix`.
+20. Record with `Micro + son ordinateur`: speak into the microphone and play computer audio, then verify the saved file contains both.
+21. Verify `Micro + son ordinateur` does not ask for screen/window selection.
+22. Try `Capture systeme experimentale`: if Obsidian/Electron provides no audio track, it fails clearly without creating a silent recording.
+23. Verify `recording_source_requested`, `recording_source_used`, `microphone_input_device_label`, and `computer_audio_input_device_label` are written in the meeting note.
+24. Generate an AI Summary and verify there is no global Markdown code block, no raw transcript, and no internal prompt/source labels.
 
 ## Privacy Notes
 

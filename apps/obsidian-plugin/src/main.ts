@@ -31,8 +31,14 @@ const DEFAULT_RECORDING_MIME_TYPE = "audio/webm";
 const SUPPORTED_AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".webm", ".ogg"]);
 type TemplateInstallSet = "minimal" | "fr" | "en" | "all";
 type TemplateGroup = "meeting_note" | "meeting_summary" | "actions" | "technical" | "client" | "other";
-type RecordingSource = "microphone_only" | "selected_audio_input" | "experimental_system_capture";
-type RecordingSourceUsed = "microphone_only" | "selected_audio_input" | "experimental_system_capture" | "system_audio_unavailable";
+type RecordingSource = "microphone_only" | "computer_audio_only" | "microphone_plus_computer_audio" | "experimental_system_capture" | "selected_audio_input";
+type RecordingSourceUsed =
+  | "microphone_only"
+  | "computer_audio_only"
+  | "microphone_plus_computer_audio"
+  | "experimental_system_capture"
+  | "experimental_system_audio_unavailable"
+  | "selected_audio_input";
 const MINIMAL_RECOMMENDED_TEMPLATE_FILES = new Set(["meeting-note-fr.md", "compte-rendu-reunion-fr.md", "meeting-note-en.md", "meeting-minutes-en.md"]);
 const RECOMMENDED_TEMPLATES: Array<{ fileName: string; content: string; language: "fr" | "en"; minimal: boolean }> = [
   {
@@ -363,6 +369,8 @@ interface ActiveRecordingSession {
   audioContext: AudioContext | null;
   recordingSourceRequested: RecordingSource;
   recordingSourceUsed: RecordingSourceUsed;
+  microphoneInputDeviceLabel: string;
+  computerAudioInputDeviceLabel: string;
   chunks: BlobPart[];
 }
 
@@ -375,6 +383,8 @@ interface RecordingStopResult {
   fileExtension: string;
   recordingSourceRequested: RecordingSource;
   recordingSourceUsed: RecordingSourceUsed;
+  microphoneInputDeviceLabel: string;
+  computerAudioInputDeviceLabel: string;
 }
 
 interface PluginSettings {
@@ -389,6 +399,10 @@ interface PluginSettings {
   outputLanguage: "same_as_meeting" | "fr" | "en";
   recordingSource: RecordingSource;
   preferredTemplateLanguage: "auto" | "fr" | "en";
+  microphoneInputDeviceId: string;
+  microphoneInputDeviceLabel: string;
+  computerAudioInputDeviceId: string;
+  computerAudioInputDeviceLabel: string;
   audioInputDeviceId: string;
   audioInputDeviceLabel: string;
   quickActionsLanguage: "same_as_input" | "fr" | "en";
@@ -409,6 +423,10 @@ const DEFAULT_SETTINGS: PluginSettings = {
   outputLanguage: "same_as_meeting",
   recordingSource: "microphone_only",
   preferredTemplateLanguage: "auto",
+  microphoneInputDeviceId: "",
+  microphoneInputDeviceLabel: "Default microphone",
+  computerAudioInputDeviceId: "",
+  computerAudioInputDeviceLabel: "Not configured",
   audioInputDeviceId: "",
   audioInputDeviceLabel: "Default microphone",
   quickActionsLanguage: "same_as_input",
@@ -513,7 +531,14 @@ export default class LocalAiPlatformPlugin extends Plugin {
       this.settings.recordingSource = "experimental_system_capture";
     }
     if (this.settings.recordingSource === ("microphone_and_system_audio" as RecordingSource)) {
-      this.settings.recordingSource = "experimental_system_capture";
+      this.settings.recordingSource = "microphone_plus_computer_audio";
+    }
+    if (this.settings.recordingSource === "selected_audio_input") {
+      this.settings.recordingSource = "computer_audio_only";
+    }
+    if (!this.settings.microphoneInputDeviceId && this.settings.audioInputDeviceId) {
+      this.settings.microphoneInputDeviceId = this.settings.audioInputDeviceId;
+      this.settings.microphoneInputDeviceLabel = this.settings.audioInputDeviceLabel || "Selected microphone";
     }
   }
 
@@ -649,7 +674,8 @@ export default class LocalAiPlatformPlugin extends Plugin {
           recordingStatus: "in progress",
           recordingSourceRequested: this.getRecordingSource(),
           recordingSourceUsed: recordingStream.recordingSourceUsed,
-          audioInputDeviceLabel: this.getSelectedAudioInputLabel(),
+          microphoneInputDeviceLabel: this.getSelectedMicrophoneInputLabel(),
+          computerAudioInputDeviceLabel: this.getSelectedComputerAudioInputLabel(),
         });
         const noteFile = await createOrReplaceFile(this.app, notePath, noteContent);
         await this.app.workspace.getLeaf(true).openFile(noteFile);
@@ -674,6 +700,8 @@ export default class LocalAiPlatformPlugin extends Plugin {
           audioContext: recordingStream.audioContext,
           recordingSourceRequested: this.getRecordingSource(),
           recordingSourceUsed: recordingStream.recordingSourceUsed,
+          microphoneInputDeviceLabel: this.getSelectedMicrophoneInputLabel(),
+          computerAudioInputDeviceLabel: this.getSelectedComputerAudioInputLabel(),
           chunks,
         };
 
@@ -830,19 +858,46 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return this.settings.recordingSource || "microphone_only";
   }
 
-  getSelectedAudioInputLabel(): string {
-    if (!this.settings.audioInputDeviceId) {
+  getSelectedMicrophoneInputLabel(): string {
+    if (!this.settings.microphoneInputDeviceId) {
       return "Default microphone";
     }
-    return this.settings.audioInputDeviceLabel || "Selected audio input";
+    return this.settings.microphoneInputDeviceLabel || "Selected microphone";
+  }
+
+  getSelectedComputerAudioInputLabel(): string {
+    if (!this.settings.computerAudioInputDeviceId) {
+      return "Not configured";
+    }
+    return this.settings.computerAudioInputDeviceLabel || "Selected computer audio input";
   }
 
   getAudioInputDeviceChoices(): AudioInputDeviceChoice[] {
     const choices = [...this.audioInputDevices];
+    const addMissingChoice = (deviceId: string, label: string): void => {
+      if (deviceId && !choices.some((choice) => choice.deviceId === deviceId)) {
+        choices.push({ deviceId, label });
+      }
+    };
+    addMissingChoice(this.settings.microphoneInputDeviceId, this.settings.microphoneInputDeviceLabel || "Previously selected microphone");
+    addMissingChoice(this.settings.computerAudioInputDeviceId, this.settings.computerAudioInputDeviceLabel || "Previously selected computer audio input");
     if (this.settings.audioInputDeviceId && !choices.some((choice) => choice.deviceId === this.settings.audioInputDeviceId)) {
       choices.push({
         deviceId: this.settings.audioInputDeviceId,
         label: this.settings.audioInputDeviceLabel || "Previously selected audio input",
+      });
+    }
+    return choices;
+  }
+
+  getComputerAudioInputDeviceChoices(): AudioInputDeviceChoice[] {
+    const choices = this.getAudioInputDeviceChoices().map((choice) =>
+      choice.deviceId ? { ...choice, label: formatComputerAudioInputLabel(choice.label) } : { deviceId: "", label: "Non configure" },
+    );
+    if (this.settings.computerAudioInputDeviceId && !choices.some((choice) => choice.deviceId === this.settings.computerAudioInputDeviceId)) {
+      choices.push({
+        deviceId: this.settings.computerAudioInputDeviceId,
+        label: this.settings.computerAudioInputDeviceLabel || "Entree son ordinateur precedente",
       });
     }
     return choices;
@@ -936,31 +991,53 @@ export default class LocalAiPlatformPlugin extends Plugin {
       })),
     ];
 
-    if (this.settings.audioInputDeviceId) {
-      const selected = this.audioInputDevices.find((device) => device.deviceId === this.settings.audioInputDeviceId);
-      if (selected) {
-        this.settings.audioInputDeviceLabel = selected.label;
-      } else {
-        this.settings.audioInputDeviceId = "";
-        this.settings.audioInputDeviceLabel = "Default microphone";
+    const syncSelectedDevice = (
+      deviceId: string,
+      fallbackLabel: string,
+      update: (nextDeviceId: string, nextLabel: string) => void,
+    ): void => {
+      if (!deviceId) {
+        return;
       }
-      await this.saveSettings();
-    }
+      const selected = this.audioInputDevices.find((device) => device.deviceId === deviceId);
+      if (selected) {
+        update(deviceId, selected.label);
+      } else {
+        update("", fallbackLabel);
+      }
+    };
 
     const likelySystemInput = findLikelySystemAudioInput(this.audioInputDevices);
+    syncSelectedDevice(this.settings.microphoneInputDeviceId, "Default microphone", (deviceId, label) => {
+      this.settings.microphoneInputDeviceId = deviceId;
+      this.settings.microphoneInputDeviceLabel = label;
+    });
+    syncSelectedDevice(this.settings.computerAudioInputDeviceId, "Not configured", (deviceId, label) => {
+      this.settings.computerAudioInputDeviceId = deviceId;
+      this.settings.computerAudioInputDeviceLabel = label;
+    });
+    if (!this.settings.computerAudioInputDeviceId && likelySystemInput) {
+      this.settings.computerAudioInputDeviceId = likelySystemInput.deviceId;
+      this.settings.computerAudioInputDeviceLabel = likelySystemInput.label;
+    }
+    await this.saveSettings();
+
     if (likelySystemInput) {
-      new Notice(`Une entree systeme possible a ete detectee : ${likelySystemInput.label}. Tu peux la selectionner comme Audio input device.`, 9000);
+      new Notice(`Entree son ordinateur detectee : ${likelySystemInput.label}`, 9000);
       return;
     }
 
-    new Notice("Aucune entree audio systeme native n'a ete detectee. Dans Windows, verifie si Mixage stereo / Stereo Mix existe dans les peripheriques d'enregistrement desactives.", 10000);
+    new Notice("Aucune entree ordinateur native detectee. Verifie Mixage stereo / Stereo Mix dans Windows.", 10000);
   }
 
-  async testAudioInput(): Promise<void> {
+  async testAudioInput(kind: "microphone" | "computer"): Promise<void> {
     let stream: MediaStream | null = null;
     let audioContext: AudioContext | null = null;
     try {
-      stream = await this.requestMicrophoneStream();
+      if (kind === "computer") {
+        new Notice("Lance un son sur l'ordinateur pendant le test.", 5000);
+      }
+      stream = kind === "microphone" ? await this.requestMicrophoneStream() : await this.requestComputerAudioStream();
       audioContext = new AudioContext();
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 2048;
@@ -981,7 +1058,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
       if (audioDetected) {
         new Notice("Audio detected.", 6000);
-      } else if (this.getRecordingSource() === "selected_audio_input") {
+      } else if (kind === "computer") {
         new Notice("No audio detected. Lance un son sur l'ordinateur ou verifie le peripherique selectionne.", 8000);
       } else {
         new Notice("No audio detected.", 6000);
@@ -1001,8 +1078,8 @@ export default class LocalAiPlatformPlugin extends Plugin {
     }
   }
 
-  getAudioInputConstraints(): boolean | MediaTrackConstraints {
-    const selectedDeviceId = this.settings.audioInputDeviceId.trim();
+  getAudioInputConstraints(deviceId: string): boolean | MediaTrackConstraints {
+    const selectedDeviceId = deviceId.trim();
     if (!selectedDeviceId) {
       return true;
     }
@@ -1011,9 +1088,20 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
   async requestMicrophoneStream(): Promise<MediaStream> {
     try {
-      return await navigator.mediaDevices.getUserMedia({ audio: this.getAudioInputConstraints() });
+      return await navigator.mediaDevices.getUserMedia({ audio: this.getAudioInputConstraints(this.settings.microphoneInputDeviceId) });
     } catch {
       throw new UserFacingError("Microphone permission was denied or unavailable.");
+    }
+  }
+
+  async requestComputerAudioStream(): Promise<MediaStream> {
+    if (!this.settings.computerAudioInputDeviceId.trim()) {
+      throw new UserFacingError("Selectionne Mixage stereo / Stereo Mix dans Son ordinateur.");
+    }
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: this.getAudioInputConstraints(this.settings.computerAudioInputDeviceId) });
+    } catch {
+      throw new UserFacingError("L'entree son ordinateur est refusee ou indisponible.");
     }
   }
 
@@ -1024,13 +1112,39 @@ export default class LocalAiPlatformPlugin extends Plugin {
     recordingSourceUsed: RecordingSourceUsed;
   }> {
     const recordingSource = this.getRecordingSource();
-    if (recordingSource === "microphone_only" || recordingSource === "selected_audio_input") {
+    if (recordingSource === "microphone_only") {
       return {
         stream: await this.requestMicrophoneStream(),
         extraStreams: [],
         audioContext: null,
-        recordingSourceUsed: recordingSource,
+        recordingSourceUsed: "microphone_only",
       };
+    }
+
+    if (recordingSource === "computer_audio_only" || recordingSource === "selected_audio_input") {
+      return {
+        stream: await this.requestComputerAudioStream(),
+        extraStreams: [],
+        audioContext: null,
+        recordingSourceUsed: "computer_audio_only",
+      };
+    }
+
+    if (recordingSource === "microphone_plus_computer_audio") {
+      const microphoneStream = await this.requestMicrophoneStream();
+      try {
+        const computerStream = await this.requestComputerAudioStream();
+        const mixed = createMixedAudioStream(microphoneStream, computerStream);
+        return {
+          stream: mixed.stream,
+          extraStreams: [microphoneStream, computerStream],
+          audioContext: mixed.audioContext,
+          recordingSourceUsed: "microphone_plus_computer_audio",
+        };
+      } catch (error) {
+        stopMediaStream(microphoneStream);
+        throw error;
+      }
     }
 
     const shouldContinue = await confirmSystemAudioCapture(this.app);
@@ -1433,6 +1547,8 @@ export default class LocalAiPlatformPlugin extends Plugin {
       fileExtension: session.fileExtension,
       recordingSourceRequested: session.recordingSourceRequested,
       recordingSourceUsed: session.recordingSourceUsed,
+      microphoneInputDeviceLabel: session.microphoneInputDeviceLabel,
+      computerAudioInputDeviceLabel: session.computerAudioInputDeviceLabel,
     };
   }
 
@@ -1771,7 +1887,11 @@ class NoteCompagnonDashboardView extends ItemView {
       new Setting(container).setName("Modele actif").setDesc(this.plugin.settings.defaultModel || "Not configured");
       new Setting(container).setName("Transcription").setDesc(formatTranscriptionLanguageLabel(this.plugin.getTranscriptionLanguage()));
       new Setting(container).setName("Sortie").setDesc(formatOutputLanguageLabel(this.plugin.getOutputLanguage()));
-      new Setting(container).setName("Source audio").setDesc(formatRecordingSourceLabel(this.plugin.getRecordingSource(), this.plugin.getSelectedAudioInputLabel()));
+      new Setting(container)
+        .setName("Mode audio")
+        .setDesc(formatRecordingSourceLabel(this.plugin.getRecordingSource(), this.plugin.getSelectedMicrophoneInputLabel(), this.plugin.getSelectedComputerAudioInputLabel()));
+      new Setting(container).setName("Microphone").setDesc(this.plugin.getSelectedMicrophoneInputLabel());
+      new Setting(container).setName("Son ordinateur").setDesc(this.plugin.getSelectedComputerAudioInputLabel());
     }
   }
 
@@ -2015,37 +2135,70 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
           }),
       );
 
+    containerEl.createEl("h3", { text: "Audio de reunion" });
+    containerEl.createEl("h4", { text: "Mode d'enregistrement" });
     new Setting(containerEl)
-      .setName("Recording source")
-      .setDesc("Sans outil externe, Note Compagnon enregistre les entrees audio exposees par Windows. La capture systeme directe depend d'Obsidian/Electron.")
+      .setName("Mode d'enregistrement")
+      .setDesc("Pour Teams, utilise de preference Micro + son ordinateur avec Microphone = ton micro et Son ordinateur = Mixage stereo.")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("microphone_only", "Micro seul")
-          .addOption("selected_audio_input", "Entree audio selectionnee")
-          .addOption("experimental_system_capture", "Capture systeme experimentale")
+          .addOption("computer_audio_only", "Son ordinateur seul")
+          .addOption("microphone_plus_computer_audio", "Micro + son ordinateur")
+          .addOption("experimental_system_capture", "Capture systeme experimentale (avance)")
           .setValue(this.plugin.settings.recordingSource)
           .onChange(async (value) => {
             this.plugin.settings.recordingSource = value as RecordingSource;
             await this.plugin.saveSettings();
+            this.display();
           }),
       );
 
+    if (this.plugin.getRecordingSource() === "experimental_system_capture") {
+      new Setting(containerEl)
+        .setName("Option avancee")
+        .setDesc("Avance : depend d'Obsidian/Electron, peut ne pas fonctionner.");
+    }
+
+    containerEl.createEl("h4", { text: "Sources audio" });
     new Setting(containerEl)
-      .setName("Audio input device")
-      .setDesc("Choisis une entree audio Windows. Pour le son ordinateur sans outil externe, cherche Mixage stereo / Stereo Mix si ton pilote le propose.")
+      .setName("Microphone")
+      .setDesc("Ta voix. Selectionne ton micro physique.")
       .addDropdown((dropdown) => {
         for (const device of this.plugin.getAudioInputDeviceChoices()) {
           dropdown.addOption(device.deviceId, device.label);
         }
-        return dropdown.setValue(this.plugin.settings.audioInputDeviceId).onChange(async (value) => {
+        return dropdown.setValue(this.plugin.settings.microphoneInputDeviceId).onChange(async (value) => {
           const selected = this.plugin.getAudioInputDeviceChoices().find((device) => device.deviceId === value);
-          this.plugin.settings.audioInputDeviceId = value;
-          this.plugin.settings.audioInputDeviceLabel = selected?.label ?? "Selected audio input";
+          this.plugin.settings.microphoneInputDeviceId = value;
+          this.plugin.settings.microphoneInputDeviceLabel = selected?.label ?? "Selected microphone";
           await this.plugin.saveSettings();
         });
-      })
+      });
+
+    new Setting(containerEl)
+      .setName("Son ordinateur")
+      .setDesc(this.plugin.getRecordingSource() === "microphone_only"
+        ? "Son de l'ordinateur. Non utilise en mode Micro seul."
+        : "Son de l'ordinateur. Selectionne Mixage stereo / Stereo Mix si disponible.")
+      .addDropdown((dropdown) => {
+        for (const device of this.plugin.getComputerAudioInputDeviceChoices()) {
+          dropdown.addOption(device.deviceId, device.label);
+        }
+        return dropdown.setValue(this.plugin.settings.computerAudioInputDeviceId).onChange(async (value) => {
+          const selected = this.plugin.getComputerAudioInputDeviceChoices().find((device) => device.deviceId === value);
+          this.plugin.settings.computerAudioInputDeviceId = value;
+          this.plugin.settings.computerAudioInputDeviceLabel = value ? stripRecommendedSuffix(selected?.label ?? "Selected computer audio input") : "Not configured";
+          await this.plugin.saveSettings();
+        });
+      });
+
+    containerEl.createEl("h4", { text: "Tests" });
+    const audioTestsSetting = new Setting(containerEl)
+      .setName("Peripheriques audio")
+      .setDesc("Actualise les listes, puis teste chaque source avant une reunion.")
       .addButton((button) =>
-        button.setButtonText("Refresh audio devices").onClick(async () => {
+        button.setButtonText("Actualiser les peripheriques").onClick(async () => {
           try {
             await this.plugin.refreshAudioInputDevices(true);
             this.display();
@@ -2055,14 +2208,29 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
         }),
       )
       .addButton((button) =>
-        button.setButtonText("Test audio input").onClick(async () => {
+        button.setButtonText("Tester le micro").onClick(async () => {
           try {
-            await this.plugin.testAudioInput();
+            await this.plugin.testAudioInput("microphone");
+          } catch (error) {
+            this.plugin.showUserFacingError(error);
+          }
+        }),
+      )
+      .addButton((button) =>
+        button.setButtonText("Tester le son ordinateur").onClick(async () => {
+          try {
+            await this.plugin.testAudioInput("computer");
           } catch (error) {
             this.plugin.showUserFacingError(error);
           }
         }),
       );
+    audioTestsSetting.controlEl.style.flexWrap = "wrap";
+    audioTestsSetting.controlEl.style.gap = "6px";
+
+    new Setting(containerEl)
+      .setName("Configuration recommandee pour Teams")
+      .setDesc(createAudioHelpFragment());
 
     new Setting(containerEl)
       .setName("Meetings folder")
@@ -2735,24 +2903,44 @@ function formatTranscriptionLanguageLabel(transcriptionLanguage: string): string
   return "Auto";
 }
 
-function formatRecordingSourceLabel(recordingSource: RecordingSource, audioInputLabel: string): string {
-  if (recordingSource === "selected_audio_input") {
-    return `Entree audio selectionnee (${audioInputLabel})`;
+function formatRecordingSourceLabel(recordingSource: RecordingSource, microphoneLabel: string, computerAudioLabel: string): string {
+  if (recordingSource === "computer_audio_only" || recordingSource === "selected_audio_input") {
+    return `Son ordinateur seul (${computerAudioLabel})`;
+  }
+  if (recordingSource === "microphone_plus_computer_audio") {
+    return `Micro + son ordinateur (${microphoneLabel} + ${computerAudioLabel})`;
   }
   if (recordingSource === "experimental_system_capture") {
     return "Capture systeme experimentale";
   }
-  return `Micro seul (${audioInputLabel})`;
+  return `Micro seul (${microphoneLabel})`;
 }
 
 function findLikelySystemAudioInput(devices: AudioInputDeviceChoice[]): AudioInputDeviceChoice | null {
-  const patterns = ["mixage stereo", "stereo mix", "what u hear", "loopback", "monitor"];
+  const patterns = ["mixage stereo", "stereo mix", "what u hear", "loopback", "monitor", "mix"];
   return (
     devices.find((device) => {
       const label = normalizeDeviceLabelForMatch(device.label);
       return patterns.some((pattern) => label.includes(pattern));
     }) ?? null
   );
+}
+
+function formatComputerAudioInputLabel(label: string): string {
+  if (!label || label === "Default microphone") {
+    return "Non configure";
+  }
+  return isLikelySystemAudioInputLabel(label) ? `${label} (recommande)` : label;
+}
+
+function stripRecommendedSuffix(label: string): string {
+  return label.replace(/\s+\(recommande\)$/i, "");
+}
+
+function isLikelySystemAudioInputLabel(label: string): boolean {
+  const patterns = ["mixage stereo", "stereo mix", "what u hear", "loopback", "monitor", "mix"];
+  const normalized = normalizeDeviceLabelForMatch(label);
+  return patterns.some((pattern) => normalized.includes(pattern));
 }
 
 function normalizeDeviceLabelForMatch(label: string): string {
@@ -2784,6 +2972,32 @@ function styleAssistantAnswer(container: HTMLElement): void {
   for (const codeBlock of Array.from(container.querySelectorAll("pre"))) {
     (codeBlock as HTMLElement).style.whiteSpace = "pre-wrap";
   }
+}
+
+function createAudioHelpFragment(): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+  const list = document.createElement("ol");
+  for (const item of [
+    "Mode d'enregistrement : Micro + son ordinateur",
+    "Microphone : ton micro physique",
+    "Son ordinateur : Mixage stereo / Stereo Mix",
+    "Clique sur Tester le micro, puis Tester le son ordinateur",
+  ]) {
+    const li = document.createElement("li");
+    li.textContent = item;
+    list.appendChild(li);
+  }
+  fragment.appendChild(list);
+
+  const listenNote = document.createElement("p");
+  listenNote.textContent = "Il n'est pas necessaire d'activer 'Ecouter ce peripherique' dans Windows. Note Compagnon mixe les deux sources lui-meme.";
+  fragment.appendChild(listenNote);
+
+  const driverNote = document.createElement("p");
+  driverNote.textContent = "Si Mixage stereo n'apparait pas ou ne recoit aucun son, le probleme vient du pilote audio ou de la sortie utilisee.";
+  fragment.appendChild(driverNote);
+
+  return fragment;
 }
 
 function formatJobStatusNotice(status: JobStatusResponsePayload["status"]): string {
@@ -2820,7 +3034,8 @@ function buildMeetingSourceNote(input: {
   recordingStatus: "in progress" | "completed";
   recordingSourceRequested: string;
   recordingSourceUsed: string;
-  audioInputDeviceLabel: string;
+  microphoneInputDeviceLabel: string;
+  computerAudioInputDeviceLabel: string;
 }): string {
   return `# ${input.title}
 
@@ -2828,7 +3043,8 @@ Date: ${formatIsoTimestamp(input.startedAt)}
 Recording status: ${input.recordingStatus}
 recording_source_requested: ${input.recordingSourceRequested}
 recording_source_used: ${input.recordingSourceUsed}
-audio_input_device_label: ${input.audioInputDeviceLabel}
+microphone_input_device_label: ${input.microphoneInputDeviceLabel}
+computer_audio_input_device_label: ${input.computerAudioInputDeviceLabel}
 
 ## Notes manuelles
 
@@ -3142,6 +3358,32 @@ function extractAudioOnlyStream(stream: MediaStream): MediaStream | null {
   }
 
   return new MediaStream(audioTracks);
+}
+
+function createMixedAudioStream(
+  microphoneStream: MediaStream,
+  computerAudioStream: MediaStream,
+): { stream: MediaStream; audioContext: AudioContext; cleanup: () => Promise<void> } {
+  const audioContext = new AudioContext();
+  const destination = audioContext.createMediaStreamDestination();
+
+  const microphoneSource = audioContext.createMediaStreamSource(microphoneStream);
+  const microphoneGain = audioContext.createGain();
+  microphoneGain.gain.value = 1.0;
+  microphoneSource.connect(microphoneGain).connect(destination);
+
+  const computerSource = audioContext.createMediaStreamSource(computerAudioStream);
+  const computerGain = audioContext.createGain();
+  computerGain.gain.value = 1.0;
+  computerSource.connect(computerGain).connect(destination);
+
+  return {
+    stream: destination.stream,
+    audioContext,
+    cleanup: async () => {
+      await audioContext.close();
+    },
+  };
 }
 
 function isDomExceptionName(error: unknown, name: string): boolean {
