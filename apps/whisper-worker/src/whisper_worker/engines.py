@@ -82,6 +82,8 @@ def _resolve_faster_whisper_language(transcription_language: str | None, default
         return None
     if transcription_language in {"fr", "en"}:
         return transcription_language
+    if default_language in {None, "", "auto"}:
+        return None
     return default_language
 
 

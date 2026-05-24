@@ -22,6 +22,53 @@ Architecture:
 - external reverse proxy outside this Compose stack
 - only `ai-gateway` published to the host, on `127.0.0.1:8000`
 
+## Configuration .env et overrides Docker Compose
+
+Docker Compose reads `.env` for variable interpolation before merging compose files. A variable is effective only when it is referenced in a compose file and injected through `environment`, `ports`, labels, or another compose field.
+
+Recommended files:
+
+- `.env`: local, ignored by Git, adjusted for the machine currently running the stack
+- `.env.example`: complete documented example, production-like by default
+- `.env.prod.example`: production-like GPU example for Docker Ollama + faster-whisper CUDA
+- `.env.dev.example`: fake/dev example for UX validation only
+
+The production-like GPU path must always include the prod overrides:
+
+```powershell
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml up -d --build
+```
+
+The production-like CPU path must include:
+
+```powershell
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.cpu.yml up -d --build
+```
+
+The prod overrides intentionally force critical runtime values even if `.env` is stale:
+
+- `LLM_PROVIDER=ollama`
+- `OLLAMA_BASE_URL=http://ollama:11434`
+- `TRANSCRIPTION_ENGINE=faster_whisper`
+- GPU: `WHISPER_DEVICE=cuda`, `WHISPER_COMPUTE_TYPE=float16`
+- CPU: `WHISPER_DEVICE=cpu`, `WHISPER_COMPUTE_TYPE=int8`
+
+Useful runtime checks:
+
+```powershell
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec ai-gateway printenv LLM_PROVIDER
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec ai-gateway printenv OLLAMA_BASE_URL
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec whisper-worker printenv TRANSCRIPTION_ENGINE
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec whisper-worker printenv WHISPER_DEVICE
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec whisper-worker printenv WHISPER_COMPUTE_TYPE
+```
+
+The easiest complete diagnostic is:
+
+```powershell
+.\scripts\prod\check-stack.ps1 -Mode gpu
+```
+
 ### 1. Preparer Ollama Docker
 
 Start Ollama with temporary outbound access for model setup:
@@ -333,7 +380,7 @@ Important variables in this mode:
 - `WHISPER_MODEL_SIZE=medium`
 - `WHISPER_DEVICE=cuda`
 - `WHISPER_COMPUTE_TYPE=float16`
-- `WHISPER_LANGUAGE=fr`
+- `WHISPER_LANGUAGE=auto`
 - `WHISPER_MODEL_CACHE_DIR=/models/whisper`
 
 Create a development token:
@@ -626,7 +673,7 @@ For CPU-only local testing with real transcription:
 - `WHISPER_DEVICE=cpu`
 - `WHISPER_MODEL_SIZE=medium`
 - `WHISPER_COMPUTE_TYPE=int8`
-- `WHISPER_LANGUAGE=fr`
+- `WHISPER_LANGUAGE=auto`
 
 For an NVIDIA RTX 3090:
 
@@ -635,6 +682,7 @@ For an NVIDIA RTX 3090:
 - `WHISPER_COMPUTE_TYPE=float16`
 - `WHISPER_MODEL_SIZE=large-v3` for best quality
 - `WHISPER_MODEL_SIZE=medium` for lower latency and lower VRAM usage
+- `WHISPER_LANGUAGE=auto` for bilingual FR/EN meetings
 
 Audio files and transcript results remain local to your self-hosted storage under `AUDIO_STORAGE_DIR`.
 

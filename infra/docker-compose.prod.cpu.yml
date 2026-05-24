@@ -13,7 +13,7 @@ services:
       WHISPER_MODEL_SIZE: small
       WHISPER_DEVICE: cpu
       WHISPER_COMPUTE_TYPE: int8
-      WHISPER_LANGUAGE: fr
+      WHISPER_LANGUAGE: auto
       WHISPER_MODEL_CACHE_DIR: /models/whisper
       HF_HOME: /models/whisper
       HUGGINGFACE_HUB_CACHE: /models/whisper/hub

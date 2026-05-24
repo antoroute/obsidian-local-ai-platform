@@ -42,11 +42,14 @@ function Assert-ServiceHasNoPublishedPort {
 
     try {
         $result = docker compose @ComposeFiles port $Service $Port 2>$null
+        if ($result -and ($result -match "invalid IP:0|No public port|not published|no port")) {
+            return
+        }
         if ($LASTEXITCODE -eq 0 -and $result) {
             throw "$Service unexpectedly exposes port ${Port}: $result"
         }
     } catch {
-        if ($_.Exception.Message -notlike "*No public port*") {
+        if ($_.Exception.Message -notlike "*No public port*" -and $_.Exception.Message -notlike "*not published*" -and $_.Exception.Message -notlike "*invalid IP:0*" -and $_.Exception.Message -notlike "*no port*") {
             throw
         }
     }
@@ -59,6 +62,30 @@ function Get-WorkerEnv {
     )
 
     return (Invoke-ComposeExec -ComposeFiles $ComposeFiles -Service "whisper-worker" -Command @("python", "-c", "import os; print(os.getenv('$Name', 'unset'))")).Trim()
+}
+
+function Get-GatewayEnv {
+    param(
+        [string[]]$ComposeFiles,
+        [string]$Name
+    )
+
+    return (Invoke-ComposeExec -ComposeFiles $ComposeFiles -Service "ai-gateway" -Command @("printenv", $Name)).Trim()
+}
+
+function Print-EffectiveRuntimeConfiguration {
+    param([string[]]$ComposeFiles)
+
+    Write-Host "Effective runtime configuration" -ForegroundColor Cyan
+    foreach ($name in @("LLM_PROVIDER", "OLLAMA_BASE_URL", "DEFAULT_MODEL", "ALLOWED_MODELS")) {
+        $value = Get-GatewayEnv -ComposeFiles $ComposeFiles -Name $name
+        Write-Host "ai-gateway $name=$value"
+    }
+    foreach ($name in @("TRANSCRIPTION_ENGINE", "WHISPER_MODEL_SIZE", "WHISPER_DEVICE", "WHISPER_COMPUTE_TYPE", "WHISPER_LANGUAGE", "WHISPER_MODEL_CACHE_DIR")) {
+        $value = Get-WorkerEnv -ComposeFiles $ComposeFiles -Name $name
+        Write-Host "whisper-worker $name=$value"
+    }
+    Write-Host ""
 }
 
 function Assert-WorkerEnv {
@@ -95,6 +122,7 @@ function Test-GpuWorkerRuntime {
 Push-Location $repoRoot
 try {
     $composeFiles = Get-ComposeFiles -SelectedMode $Mode
+    Print-EffectiveRuntimeConfiguration -ComposeFiles $composeFiles
 
     Write-Host "Checking Gateway health..." -ForegroundColor Cyan
     $health = Invoke-RestMethod -Uri "http://127.0.0.1:8000/v1/health" -TimeoutSec 10
@@ -103,13 +131,13 @@ try {
     }
     Write-Host "OK Gateway health" -ForegroundColor Green
 
-    $llmProvider = (Invoke-ComposeExec -ComposeFiles $composeFiles -Service "ai-gateway" -Command @("printenv", "LLM_PROVIDER")).Trim()
+    $llmProvider = Get-GatewayEnv -ComposeFiles $composeFiles -Name "LLM_PROVIDER"
     if ($llmProvider -ne "ollama") {
         throw "LLM_PROVIDER is '$llmProvider' instead of 'ollama'."
     }
     Write-Host "OK Gateway LLM_PROVIDER=ollama" -ForegroundColor Green
 
-    $ollamaBaseUrl = (Invoke-ComposeExec -ComposeFiles $composeFiles -Service "ai-gateway" -Command @("printenv", "OLLAMA_BASE_URL")).Trim()
+    $ollamaBaseUrl = Get-GatewayEnv -ComposeFiles $composeFiles -Name "OLLAMA_BASE_URL"
     if ($ollamaBaseUrl -ne "http://ollama:11434") {
         throw "OLLAMA_BASE_URL is '$ollamaBaseUrl' instead of 'http://ollama:11434'."
     }
@@ -149,10 +177,12 @@ try {
     Write-Host ""
     Write-Host "Stack diagnostic failed." -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
-    if ($Mode -eq "gpu") {
-        Write-Host "Prod GPU stack is not using faster_whisper cuda. Check compose overrides." -ForegroundColor Red
-    } else {
-        Write-Host "Prod CPU stack is not using faster_whisper cpu/int8. Check compose overrides." -ForegroundColor Red
+    if ($_.Exception.Message -match "LLM_PROVIDER|OLLAMA_BASE_URL|TRANSCRIPTION_ENGINE|WHISPER_DEVICE|WHISPER_COMPUTE_TYPE") {
+        if ($Mode -eq "gpu") {
+            Write-Host "Prod GPU stack is not using faster_whisper cuda. Check compose overrides." -ForegroundColor Red
+        } else {
+            Write-Host "Prod CPU stack is not using faster_whisper cpu/int8. Check compose overrides." -ForegroundColor Red
+        }
     }
     Write-Host ""
     Write-Host "Actionable checks:" -ForegroundColor Yellow
