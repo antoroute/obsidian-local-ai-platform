@@ -11,7 +11,7 @@ services:
       DEFAULT_MODEL: mistral:latest
       ALLOWED_MODELS: mistral:latest,qwen2.5:14b,llama3:latest
     ports:
-      - "127.0.0.1:8000:8000"
+      - "192.168.1.40:8000:8000"
 
   whisper-worker:
     environment:
