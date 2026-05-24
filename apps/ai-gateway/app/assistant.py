@@ -18,22 +18,27 @@ If no context is provided, answer generally from the user message only.
 If context is provided, use it only as reference material."""
 
 MODE_INSTRUCTIONS = {
-    "chat": "Answer the user's question clearly and practically. Do not use a note template unless explicitly requested.",
+    "chat": (
+        "Answer the user's question directly, clearly, and practically. "
+        "If no context is provided, do not invent context and answer generally from the user message only. "
+        "If context is provided, use it only as reference material. "
+        "Do not use, fill, or imitate a note template unless explicitly requested."
+    ),
     "correct": (
         "Correct spelling, grammar, typography, and punctuation. Preserve the meaning. "
-        "Keep the input language unless the language instruction explicitly forces another language. "
+        "Keep the same language as the input when Language is same_as_input. Do not translate unless explicitly forced. "
         "Do not strongly rephrase. Do not add explanations. Do not write 'Here is the correction'. "
         "Return only the corrected text."
     ),
     "rewrite": (
         "Improve clarity, flow, and style. Preserve the meaning. Do not make the text unnecessarily longer. "
-        "Keep the input language unless the language instruction explicitly forces another language. "
+        "Keep the same language as the input when Language is same_as_input. Do not translate unless explicitly forced. "
         "Do not add explanations. Do not write 'Here is a rewritten version'. "
         "Return only the rewritten text. For short texts, stay short."
     ),
     "summarize": (
         "Summarize in concise Markdown. Do not add an introduction. Do not write 'Here is the summary'. "
-        "Use the main language of the input unless the language instruction explicitly forces another language. "
+        "Use the main language of the input when Language is same_as_input. Do not translate unless explicitly forced. "
         "Return only the summary."
     ),
 }
@@ -41,7 +46,10 @@ MODE_INSTRUCTIONS = {
 LANGUAGE_INSTRUCTIONS = {
     "fr": "Write the answer in French.",
     "en": "Write the answer in English.",
-    "same_as_input": "Detect the main input language and answer in that language.",
+    "same_as_input": (
+        "same_as_input: detect the main language of the user message first, then the context if needed, "
+        "and answer in that same language. French input must receive French output. English input must receive English output."
+    ),
 }
 
 

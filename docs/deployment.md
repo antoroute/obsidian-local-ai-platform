@@ -80,6 +80,37 @@ CPU:
 .\scripts\prod\check-stack.ps1 -Mode gpu
 ```
 
+The production-like overrides intentionally replace any stale local `.env` values such as `OLLAMA_BASE_URL=http://host.docker.internal:11434`, `TRANSCRIPTION_ENGINE=fake`, or CPU Whisper settings.
+
+For GPU production-like validation, always use the full compose command:
+
+```powershell
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml up -d --build
+```
+
+For CPU production-like validation:
+
+```powershell
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.cpu.yml up -d --build
+```
+
+Verify the effective runtime values:
+
+```powershell
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec whisper-worker printenv TRANSCRIPTION_ENGINE
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec whisper-worker printenv WHISPER_DEVICE
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec whisper-worker printenv WHISPER_COMPUTE_TYPE
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec ai-gateway printenv OLLAMA_BASE_URL
+```
+
+Expected GPU values:
+
+- `TRANSCRIPTION_ENGINE=faster_whisper`
+- `WHISPER_DEVICE=cuda`
+- `WHISPER_COMPUTE_TYPE=float16`
+- `OLLAMA_BASE_URL=http://ollama:11434`
+- `LLM_PROVIDER=ollama`
+
 ### 5. Configurer Obsidian
 
 - `API Base URL = https://ai.kavalek.fr` in production
@@ -555,7 +586,7 @@ Configured healthchecks:
 
 - in the default internal Docker deployment, `OLLAMA_BASE_URL` should stay `http://ollama:11434`
 - `LLM_PROVIDER=ollama` is the normal production mode
-- `LLM_PROVIDER=fake` is a development-only runtime mode for validating the surrounding workflow without a live LLM backend
+- `LLM_PROVIDER=fake` and `TRANSCRIPTION_ENGINE=fake` are development-only runtime modes for UX validation or CI-style tests; never use them for production-like validation
 - for local Windows development with host Ollama, override `OLLAMA_BASE_URL` to `http://host.docker.internal:11434`
 - in that Windows dev mode, attach only `ai-gateway` to a non-internal `host_access` bridge network
 - `python -m app.cli check-ollama` is the quickest end-to-end diagnostic from inside `ai-gateway`
@@ -572,7 +603,7 @@ Configured healthchecks:
 - `MAX_AUDIO_UPLOAD_MB` controls the maximum accepted audio file size
 - `MAX_ASSISTANT_MESSAGE_CHARS` controls the maximum assistant chat instruction size
 - `MAX_ASSISTANT_CONTEXT_CHARS` controls the maximum selected text or note context size sent to the assistant endpoint
-- `TRANSCRIPTION_ENGINE` selects `fake` or `faster_whisper`
+- `TRANSCRIPTION_ENGINE` selects `fake` or `faster_whisper`; production-like stacks must use `faster_whisper`
 - `WHISPER_MODEL_SIZE` controls the faster-whisper model size such as `medium` or `large-v3`
 - `WHISPER_DEVICE` controls CPU or CUDA execution
 - `WHISPER_COMPUTE_TYPE` controls inference precision such as `int8`, `float16`, or `int8_float16`

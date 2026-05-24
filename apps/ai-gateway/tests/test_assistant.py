@@ -87,6 +87,42 @@ def test_assistant_chat_accepts_valid_chat(client: TestClient) -> None:
     assert payload["mode"] == "chat"
     assert payload["answer_markdown"] == "## Assistant mock\n\nMode: chat"
     assert "Write the answer in French" in fake_client.system_prompts[0]
+    assert "Do not use, fill, or imitate a note template" in fake_client.system_prompts[0]
+
+
+def test_assistant_chat_same_as_input_uses_input_language_instruction_fr(client: TestClient) -> None:
+    fake_client = FakeAssistantClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["assistant:chat"])
+
+    response = client.post(
+        "/v1/assistant/chat",
+        headers=create_bearer_header(token),
+        json=valid_payload(message="Que fait ce compagnon ?", context="", output_language="same_as_input"),
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "same_as_input: detect the main language" in fake_client.system_prompts[0]
+    assert "French input must receive French output" in fake_client.system_prompts[0]
+
+
+def test_assistant_chat_same_as_input_uses_input_language_instruction_en(client: TestClient) -> None:
+    fake_client = FakeAssistantClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["assistant:chat"])
+
+    response = client.post(
+        "/v1/assistant/chat",
+        headers=create_bearer_header(token),
+        json=valid_payload(message="What does this companion do?", context="", output_language="same_as_input"),
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "English input must receive English output" in fake_client.system_prompts[0]
 
 
 def test_assistant_chat_accepts_correct_with_context(client: TestClient) -> None:
@@ -105,6 +141,8 @@ def test_assistant_chat_accepts_correct_with_context(client: TestClient) -> None
     assert response.status_code == 200
     assert response.json()["mode"] == "correct"
     assert "Return only the corrected text" in fake_client.system_prompts[0]
+    assert "Keep the same language as the input" in fake_client.system_prompts[0]
+    assert "Do not translate unless explicitly forced" in fake_client.system_prompts[0]
 
 
 def test_assistant_chat_accepts_rewrite_with_context(client: TestClient) -> None:
@@ -123,6 +161,7 @@ def test_assistant_chat_accepts_rewrite_with_context(client: TestClient) -> None
     assert response.status_code == 200
     assert response.json()["mode"] == "rewrite"
     assert "Response style: direct" in fake_client.system_prompts[0]
+    assert "Keep the same language as the input" in fake_client.system_prompts[0]
 
 
 def test_assistant_chat_summarize_requests_no_intro(client: TestClient) -> None:
@@ -140,6 +179,36 @@ def test_assistant_chat_summarize_requests_no_intro(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert "Do not add an introduction" in fake_client.system_prompts[0]
+    assert "Use the main language of the input" in fake_client.system_prompts[0]
+
+
+def test_assistant_chat_output_language_en_forces_english(client: TestClient) -> None:
+    fake_client = FakeAssistantClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["assistant:chat"])
+
+    response = client.post(
+        "/v1/assistant/chat",
+        headers=create_bearer_header(token),
+        json=valid_payload(output_language="en"),
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "Write the answer in English" in fake_client.system_prompts[0]
+
+
+def test_assistant_chat_rejects_invalid_output_language(client: TestClient) -> None:
+    token = create_token(["assistant:chat"])
+
+    response = client.post(
+        "/v1/assistant/chat",
+        headers=create_bearer_header(token),
+        json=valid_payload(output_language="same_as_meeting"),
+    )
+
+    assert response.status_code == 422
 
 
 def test_assistant_chat_rejects_forbidden_model(client: TestClient) -> None:

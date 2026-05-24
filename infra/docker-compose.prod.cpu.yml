@@ -1,4 +1,9 @@
 services:
+  ai-gateway:
+    environment:
+      LLM_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+
   whisper-worker:
     build:
       context: ./apps/whisper-worker

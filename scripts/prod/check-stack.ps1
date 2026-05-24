@@ -125,6 +125,9 @@ try {
         Assert-WorkerEnv -ComposeFiles $composeFiles -Name "WHISPER_DEVICE" -Expected "cuda"
         Assert-WorkerEnv -ComposeFiles $composeFiles -Name "WHISPER_COMPUTE_TYPE" -Expected "float16"
         Test-GpuWorkerRuntime -ComposeFiles $composeFiles
+    } else {
+        Assert-WorkerEnv -ComposeFiles $composeFiles -Name "WHISPER_DEVICE" -Expected "cpu"
+        Assert-WorkerEnv -ComposeFiles $composeFiles -Name "WHISPER_COMPUTE_TYPE" -Expected "int8"
     }
 
     Write-Host "Checking whisper-worker engine..." -ForegroundColor Cyan
@@ -146,6 +149,11 @@ try {
     Write-Host ""
     Write-Host "Stack diagnostic failed." -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
+    if ($Mode -eq "gpu") {
+        Write-Host "Prod GPU stack is not using faster_whisper cuda. Check compose overrides." -ForegroundColor Red
+    } else {
+        Write-Host "Prod CPU stack is not using faster_whisper cpu/int8. Check compose overrides." -ForegroundColor Red
+    }
     Write-Host ""
     Write-Host "Actionable checks:" -ForegroundColor Yellow
     Write-Host '.\scripts\prod\prepare-whisper-model.ps1 -Model medium -Mode gpu' -ForegroundColor Yellow

@@ -1174,6 +1174,11 @@ export default class LocalAiPlatformPlugin extends Plugin {
     apiToken: string,
     payload: AssistantChatRequestPayload,
   ): Promise<AssistantChatResponsePayload> {
+    console.debug("Note Compagnon assistant request", {
+      endpoint: "/v1/assistant/chat",
+      mode: payload.mode,
+      output_language: payload.output_language,
+    });
     const responseText = await this.performJsonRequest({
       apiBaseUrl,
       apiToken,
