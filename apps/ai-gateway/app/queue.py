@@ -9,7 +9,13 @@ from app.config import get_settings
 
 
 class AudioJobQueue:
-    def enqueue_audio_transcription(self, job_id: str) -> None:
+    def enqueue_audio_transcription(
+        self,
+        job_id: str,
+        *,
+        input_path: str | None = None,
+        transcription_language: str = "auto",
+    ) -> None:
         raise NotImplementedError
 
 
@@ -18,8 +24,20 @@ class RedisAudioJobQueue(AudioJobQueue):
         self._redis = Redis.from_url(redis_url, decode_responses=True)
         self._queue_name = queue_name
 
-    def enqueue_audio_transcription(self, job_id: str) -> None:
-        message = json.dumps({"job_id": job_id})
+    def enqueue_audio_transcription(
+        self,
+        job_id: str,
+        *,
+        input_path: str | None = None,
+        transcription_language: str = "auto",
+    ) -> None:
+        message = json.dumps(
+            {
+                "job_id": job_id,
+                "input_path": input_path,
+                "transcription_language": transcription_language,
+            }
+        )
         self._redis.rpush(self._queue_name, message)
 
 

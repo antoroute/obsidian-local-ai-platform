@@ -13,6 +13,7 @@ AVAILABLE_SCOPES = {
     "notes:summarize",
     "meetings:generate",
     "audio:transcribe",
+    "assistant:chat",
     "admin",
 }
 

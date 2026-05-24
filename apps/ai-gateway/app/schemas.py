@@ -1,4 +1,13 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+OutputLanguage = Literal["same_as_meeting", "fr", "en"]
+TranscriptionLanguage = Literal["auto", "fr", "en"]
+AssistantMode = Literal["chat", "correct", "rewrite", "summarize"]
+AssistantOutputLanguage = Literal["same_as_input", "fr", "en"]
+AssistantResponseStyle = Literal["direct", "detailed"]
 
 
 class HealthResponse(BaseModel):
@@ -35,6 +44,7 @@ class MeetingGenerateRequest(BaseModel):
     participants: list[str] = Field(default_factory=list)
     template: str = Field(min_length=1)
     model: str | None = None
+    output_language: OutputLanguage = "same_as_meeting"
 
 
 class MeetingGenerateFromJobRequest(BaseModel):
@@ -44,6 +54,7 @@ class MeetingGenerateFromJobRequest(BaseModel):
     participants: list[str] = Field(default_factory=list)
     template: str = Field(min_length=1)
     model: str | None = None
+    output_language: OutputLanguage = "same_as_meeting"
 
 
 class MeetingUsageResponse(BaseModel):
@@ -97,3 +108,24 @@ class TranscriptResponse(BaseModel):
 class JobResultResponse(BaseModel):
     job_id: str
     transcript: TranscriptResponse
+
+
+class AssistantChatRequest(BaseModel):
+    message: str = ""
+    context: str | None = None
+    mode: AssistantMode = "chat"
+    output_language: AssistantOutputLanguage = "same_as_input"
+    response_style: AssistantResponseStyle | None = None
+    model: str | None = None
+
+
+class AssistantUsageResponse(BaseModel):
+    message_chars: int
+    context_chars: int
+
+
+class AssistantChatResponse(BaseModel):
+    model: str
+    mode: AssistantMode
+    answer_markdown: str
+    usage: AssistantUsageResponse

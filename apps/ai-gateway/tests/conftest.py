@@ -13,9 +13,23 @@ from app.main import app
 class FakeAudioJobQueue:
     def __init__(self) -> None:
         self.job_ids: list[str] = []
+        self.messages: list[dict[str, object]] = []
 
-    def enqueue_audio_transcription(self, job_id: str) -> None:
+    def enqueue_audio_transcription(
+        self,
+        job_id: str,
+        *,
+        input_path: str | None = None,
+        transcription_language: str = "auto",
+    ) -> None:
         self.job_ids.append(job_id)
+        self.messages.append(
+            {
+                "job_id": job_id,
+                "input_path": input_path,
+                "transcription_language": transcription_language,
+            }
+        )
 
 
 @pytest.fixture

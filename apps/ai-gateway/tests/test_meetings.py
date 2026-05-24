@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,6 +23,8 @@ def create_bearer_header(token: str) -> dict[str, str]:
 class FakeMeetingOllamaClient:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
+        self.system_prompts: list[str] = []
+        self.user_prompts: list[str] = []
 
     async def generate_meeting(
         self,
@@ -44,6 +47,8 @@ class FakeMeetingOllamaClient:
         assert "Never invent facts" in system_prompt
         assert "Manual notes (priority source" in user_prompt
         assert "Transcript (primary source" in user_prompt
+        self.system_prompts.append(system_prompt)
+        self.user_prompts.append(user_prompt)
         if self.fail:
             raise OllamaUnavailableError("unavailable")
         return OllamaChatResult(model=model, content="## Resume executif\n\nCompte rendu mocke.")
@@ -105,7 +110,7 @@ def create_completed_audio_job(
             updated_at=datetime.now(UTC),
         )
         if with_result:
-            result_dir = Path("apps/ai-gateway/tests/.tmp-results")
+            result_dir = Path(tempfile.gettempdir()) / "obsidian-local-ai-platform-ai-gateway-test-results"
             result_dir.mkdir(parents=True, exist_ok=True)
             result_path = result_dir / f"{job.id}.json"
             if invalid_result_json:
@@ -172,6 +177,53 @@ def test_meeting_generate_accepts_manual_notes_only(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json()["usage"]["manual_notes_chars"] > 0
+
+
+def test_meeting_generate_defaults_output_language_to_same_as_meeting(client: TestClient) -> None:
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"])
+
+    response = client.post("/v1/meetings/generate", headers=create_bearer_header(token), json=valid_payload())
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "detect the main meeting language" in fake_client.system_prompts[0]
+
+
+def test_meeting_generate_output_language_fr_adds_french_instruction(client: TestClient) -> None:
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(output_language="fr"),
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "written in French" in fake_client.system_prompts[0]
+
+
+def test_meeting_generate_output_language_en_adds_english_instruction(client: TestClient) -> None:
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(output_language="en"),
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "written in English" in fake_client.system_prompts[0]
 
 
 def test_meeting_generate_rejects_missing_sources(client: TestClient) -> None:
@@ -316,6 +368,24 @@ def test_meeting_generate_from_job_accepts_completed_job(client: TestClient) -> 
     assert response.status_code == 200
     assert response.json()["job_id"] == job_id
     assert response.json()["meeting_markdown"] == "## Resume executif\n\nCompte rendu mocke."
+
+
+def test_meeting_generate_from_job_transmits_output_language(client: TestClient) -> None:
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"], user_id="user-job-language")
+    job_id = create_completed_audio_job(user_id="user-job-language", transcript_text="Transcript from job.")
+
+    response = client.post(
+        "/v1/meetings/generate-from-job",
+        headers=create_bearer_header(token),
+        json=valid_generate_from_job_payload(job_id, output_language="en"),
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "written in English" in fake_client.system_prompts[0]
 
 
 def test_meeting_generate_from_job_rejects_non_completed_job(client: TestClient) -> None:

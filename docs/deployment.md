@@ -90,7 +90,7 @@ Create a token:
 
 ```powershell
 cd apps/ai-gateway
-.\.venv\Scripts\python -m app.cli create-token --name "obsidian-real-dev" --scopes "models:list,notes:summarize,audio:transcribe,meetings:generate"
+.\.venv\Scripts\python -m app.cli create-token --name "obsidian-real-dev" --scopes "models:list,notes:summarize,audio:transcribe,meetings:generate,assistant:chat"
 ```
 
 ### 6. Reverse proxy externe
@@ -309,7 +309,7 @@ Create a development token:
 
 ```powershell
 cd apps/ai-gateway
-.\.venv\Scripts\python -m app.cli create-token --name "obsidian-real-dev" --scopes "models:list,notes:summarize,audio:transcribe,meetings:generate"
+.\.venv\Scripts\python -m app.cli create-token --name "obsidian-real-dev" --scopes "models:list,notes:summarize,audio:transcribe,meetings:generate,assistant:chat"
 ```
 
 Configure Obsidian with:
@@ -570,11 +570,15 @@ Configured healthchecks:
 - `AUDIO_STORAGE_DIR` controls where uploaded audio and result JSON files are stored
 - `AUDIO_STORAGE_DIR` should stay `/data/audio` in Docker so the gateway and worker see the same files
 - `MAX_AUDIO_UPLOAD_MB` controls the maximum accepted audio file size
+- `MAX_ASSISTANT_MESSAGE_CHARS` controls the maximum assistant chat instruction size
+- `MAX_ASSISTANT_CONTEXT_CHARS` controls the maximum selected text or note context size sent to the assistant endpoint
 - `TRANSCRIPTION_ENGINE` selects `fake` or `faster_whisper`
 - `WHISPER_MODEL_SIZE` controls the faster-whisper model size such as `medium` or `large-v3`
 - `WHISPER_DEVICE` controls CPU or CUDA execution
 - `WHISPER_COMPUTE_TYPE` controls inference precision such as `int8`, `float16`, or `int8_float16`
-- `WHISPER_LANGUAGE` can pin the expected language, for example `fr`
+- `WHISPER_LANGUAGE` is an optional global fallback for direct worker checks; normal audio jobs carry per-job language metadata
+- audio clients can now request per-job transcription language with `transcription_language=auto|fr|en`; `auto` does not force a faster-whisper language
+- meeting generation clients can request `output_language=same_as_meeting|fr|en`; this changes the prompt instruction only
 - `WHISPER_BEAM_SIZE` controls beam search width
 - `WHISPER_MODEL_CACHE_DIR`, `HF_HOME`, and `HUGGINGFACE_HUB_CACHE` should point to the persistent model cache volume in Docker
 - TLS certificate management for public Internet exposure is a later step; Traefik is already positioned as the only public entrypoint

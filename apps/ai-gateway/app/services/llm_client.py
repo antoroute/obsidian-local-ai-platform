@@ -31,6 +31,17 @@ class LlmClient(Protocol):
         user_prompt: str,
     ) -> OllamaChatResult: ...
 
+    async def assistant_chat(
+        self,
+        *,
+        model: str,
+        mode: str,
+        message_chars: int,
+        context_chars: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult: ...
+
 
 @dataclass(frozen=True)
 class FakeLlmClient:
@@ -92,6 +103,28 @@ class FakeLlmClient:
         )
         return OllamaChatResult(model=model, content=content)
 
+    async def assistant_chat(
+        self,
+        *,
+        model: str,
+        mode: str,
+        message_chars: int,
+        context_chars: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult:
+        del system_prompt, user_prompt
+        content = (
+            "# Reponse assistant fake\n"
+            "Ceci est une reponse fake deterministe pour valider Notre Compagnon.\n\n"
+            "## Informations recues\n"
+            f"- Mode : {mode}\n"
+            f"- Modele demande : {model}\n"
+            f"- Longueur message : {message_chars} caracteres\n"
+            f"- Longueur contexte : {context_chars} caracteres\n"
+        )
+        return OllamaChatResult(model=model, content=content)
+
 
 @dataclass(frozen=True)
 class OllamaLlmClient:
@@ -127,6 +160,23 @@ class OllamaLlmClient:
         user_prompt: str,
     ) -> OllamaChatResult:
         del title, transcript_chars, manual_notes_chars, template_chars, participants
+        return await self.ollama_client.summarize_markdown(
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+
+    async def assistant_chat(
+        self,
+        *,
+        model: str,
+        mode: str,
+        message_chars: int,
+        context_chars: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult:
+        del mode, message_chars, context_chars
         return await self.ollama_client.summarize_markdown(
             model=model,
             system_prompt=system_prompt,

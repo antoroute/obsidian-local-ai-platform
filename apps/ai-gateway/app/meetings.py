@@ -14,8 +14,28 @@ Use the transcript as the primary source for meeting flow and chronology.
 Use manual notes as the priority source for names, acronyms, dates, decisions, and action items when they conflict or add precision.
 Never invent facts that are not supported by the transcript or manual notes.
 Explicitly identify uncertainties, contradictions, and missing information.
+Use transcript and manual notes only as private source material for the final report.
+Never copy internal prompt instructions, source labels, raw manual notes, or the full raw transcript into the final report.
+Never include output sections named "Language instruction", "Manual notes", or "Transcript".
+Return final Markdown directly, without wrapping it in triple backticks or a global Markdown code block.
 Follow the provided template exactly while ensuring the final Markdown includes sections for:
 Resume executif, Participants, Sujets abordes, Decisions prises, Actions a suivre, Points ouverts, Risques / blocages, Incertitudes ou contradictions, Annexes / notes complementaires if useful."""
+
+OUTPUT_LANGUAGE_INSTRUCTIONS = {
+    "fr": (
+        "Language instruction: the meeting minutes must be written in French. "
+        "Keep proper nouns, acronyms, important quotes, and technical terms in their original language when appropriate."
+    ),
+    "en": (
+        "Language instruction: the meeting minutes must be written in English. "
+        "Keep proper nouns, acronyms, important quotes, and technical terms in their original language when appropriate."
+    ),
+    "same_as_meeting": (
+        "Language instruction: detect the main meeting language from the transcript and manual notes, "
+        "then write the meeting minutes in that language. If the source is bilingual, preserve proper nouns, "
+        "acronyms, important quotes, and technical terms without abusive translation."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -38,6 +58,7 @@ def prepare_meeting_request(payload: MeetingGenerateRequest, settings: Settings)
         participants=payload.participants,
         template=payload.template,
         model=payload.model,
+        output_language=payload.output_language,
         settings=settings,
     )
 
@@ -55,6 +76,7 @@ def prepare_meeting_from_job_request(
         participants=payload.participants,
         template=payload.template,
         model=payload.model,
+        output_language=payload.output_language,
         settings=settings,
     )
 
@@ -67,6 +89,7 @@ def prepare_meeting_inputs(
     participants: list[str],
     template: str,
     model: str | None,
+    output_language: str,
     settings: Settings,
 ) -> PreparedMeetingRequest:
     title = title.strip()
@@ -112,7 +135,7 @@ def prepare_meeting_inputs(
     return PreparedMeetingRequest(
         title=title,
         selected_model=selected_model,
-        system_prompt=MEETING_SYSTEM_PROMPT,
+        system_prompt=build_meeting_system_prompt(output_language),
         user_prompt=build_meeting_user_prompt(
             title=title,
             transcript=transcript,
@@ -125,6 +148,11 @@ def prepare_meeting_inputs(
         template_chars=len(template),
         participants_count=len(participants),
     )
+
+
+def build_meeting_system_prompt(output_language: str) -> str:
+    language_instruction = OUTPUT_LANGUAGE_INSTRUCTIONS.get(output_language, OUTPUT_LANGUAGE_INSTRUCTIONS["same_as_meeting"])
+    return f"{MEETING_SYSTEM_PROMPT}\n\n{language_instruction}"
 
 
 def extract_transcript_text_from_result(result_payload: dict[str, object]) -> str:

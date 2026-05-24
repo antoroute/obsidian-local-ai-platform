@@ -98,6 +98,70 @@ Error behavior:
 - `503 Service Unavailable` when Ollama cannot be reached
 - `502 Bad Gateway` when Ollama returns an invalid upstream response
 
+### `POST /v1/assistant/chat`
+
+Protected endpoint for lightweight Obsidian assistant actions: chat, correction, rewriting, and summarization.
+
+Required authentication:
+
+- `Authorization: Bearer <token>`
+
+Required scope:
+
+- `assistant:chat`
+
+Request payload:
+
+```json
+{
+  "message": "question ou instruction utilisateur",
+  "context": "contexte optionnel, par exemple note courante ou selection",
+  "mode": "chat",
+  "output_language": "same_as_input",
+  "response_style": "direct",
+  "model": "mistral:latest"
+}
+```
+
+Accepted values:
+
+- `mode`: `chat`, `correct`, `rewrite`, `summarize`
+- `output_language`: `same_as_input`, `fr`, `en`
+- `response_style`: optional `direct` or `detailed`; when omitted, editing modes default to `direct` and chat defaults to `detailed`
+
+Behavior:
+
+- uses `DEFAULT_MODEL` when `model` is omitted
+- refuses models not present in `ALLOWED_MODELS`
+- requires `message` for `chat`
+- requires `context` for `correct`, `rewrite`, and `summarize`
+- enforces `MAX_ASSISTANT_MESSAGE_CHARS` and `MAX_ASSISTANT_CONTEXT_CHARS`
+- returns Markdown only; it is not a generic Ollama proxy
+
+Example response:
+
+```json
+{
+  "model": "mistral:latest",
+  "mode": "rewrite",
+  "answer_markdown": "Texte reecrit...",
+  "usage": {
+    "message_chars": 0,
+    "context_chars": 456
+  }
+}
+```
+
+Error behavior:
+
+- `401 Unauthorized` when the bearer token is missing or invalid
+- `403 Forbidden` when the token lacks `assistant:chat`
+- `403 Forbidden` when the requested model is outside the allowlist
+- `413 Content Too Large` when message or context exceeds configured limits
+- `422 Unprocessable Entity` when the request is malformed
+- `503 Service Unavailable` when Ollama cannot be reached
+- `502 Bad Gateway` when Ollama returns an invalid upstream response
+
 ## Planned endpoints
 
 ## Future realtime endpoint
@@ -127,7 +191,8 @@ Request payload:
   "manual_notes": "Notes prises manuellement",
   "participants": ["Antonin", "Alice"],
   "template": "Template Markdown ou consignes",
-  "model": "qwen2.5:14b"
+  "model": "qwen2.5:14b",
+  "output_language": "same_as_meeting"
 }
 ```
 
@@ -137,6 +202,8 @@ Behavior:
 - requires a non-empty `template`
 - requires at least one of `transcript` or `manual_notes`
 - uses `DEFAULT_MODEL` when `model` is omitted
+- uses `same_as_meeting` when `output_language` is omitted
+- accepts `output_language` values `same_as_meeting`, `fr`, and `en`
 - refuses models not present in `ALLOWED_MODELS`
 - enforces `MAX_TRANSCRIPT_CHARS`, `MAX_MANUAL_NOTES_CHARS`, `MAX_TEMPLATE_CHARS`, and `MAX_PARTICIPANTS`
 - uses manual notes as the priority source for names, acronyms, dates, decisions, and actions
@@ -190,7 +257,8 @@ Request payload:
   "manual_notes": "Notes prises manuellement",
   "participants": ["Antonin", "Alice"],
   "template": "Template Markdown ou consignes",
-  "model": "qwen2.5:14b"
+  "model": "qwen2.5:14b",
+  "output_language": "same_as_meeting"
 }
 ```
 
@@ -200,6 +268,7 @@ Behavior:
 - refuses jobs from other users
 - refuses queued, processing, or failed jobs
 - reuses the same meeting-generation rules as `POST /v1/meetings/generate`
+- accepts `output_language` values `same_as_meeting`, `fr`, and `en`
 - never exposes internal storage paths in the response
 
 Example response:
@@ -247,6 +316,7 @@ Required scope:
 Accepted upload field:
 
 - multipart field named `file`
+- optional multipart field `transcription_language`, one of `auto`, `fr`, or `en`; default is `auto`
 
 Accepted extensions:
 
@@ -260,6 +330,7 @@ Behavior:
 
 - stores the uploaded file under `AUDIO_STORAGE_DIR`
 - enforces `MAX_AUDIO_UPLOAD_MB`
+- stores the requested transcription language in job metadata for the worker
 - creates a queued job in the database
 - pushes the job id into Redis queue `audio_transcription_jobs`
 
@@ -344,6 +415,7 @@ Obsidian desktop can trigger browser-style CORS preflight requests, especially f
 The gateway therefore supports `OPTIONS` preflight requests for the implemented API routes, including:
 
 - `/v1/models`
+- `/v1/assistant/chat`
 - `/v1/notes/summarize`
 - `/v1/audio/transcribe`
 - `/v1/jobs/{job_id}`

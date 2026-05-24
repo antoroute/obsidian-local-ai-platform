@@ -30,7 +30,7 @@ def make_settings(tmp_path) -> WorkerSettings:
     )
 
 
-def seed_job(session_factory, input_path: Path, job_id: str = "job-1") -> None:
+def seed_job(session_factory, input_path: Path, job_id: str = "job-1", metadata: dict[str, object] | None = None) -> None:
     with session_factory() as session:
         job = Job(
             id=job_id,
@@ -40,6 +40,7 @@ def seed_job(session_factory, input_path: Path, job_id: str = "job-1") -> None:
             input_path=str(input_path),
             result_path=None,
             error=None,
+            metadata_json=json.dumps(metadata) if metadata else None,
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
         )
@@ -56,6 +57,22 @@ def test_fake_engine_returns_deterministic_transcript(tmp_path) -> None:
     assert result.language == "fr"
     assert result.duration == 0
     assert result.segments[0].text == "Fake transcript for testing."
+
+
+def test_fake_engine_respects_french_transcription_language(tmp_path) -> None:
+    engine = FakeTranscriptionEngine()
+
+    result = engine.transcribe(tmp_path / "input.mp3", transcription_language="fr")
+
+    assert result.language == "fr"
+
+
+def test_fake_engine_respects_english_transcription_language(tmp_path) -> None:
+    engine = FakeTranscriptionEngine()
+
+    result = engine.transcribe(tmp_path / "input.mp3", transcription_language="en")
+
+    assert result.language == "en"
 
 
 def test_fake_engine_remains_selectable(tmp_path) -> None:
@@ -98,6 +115,7 @@ def test_faster_whisper_engine_converts_segments(monkeypatch, tmp_path) -> None:
 
         def transcribe(self, input_path: str, language: str | None, beam_size: int):
             del input_path
+            self.language = language
             segments = [
                 SimpleNamespace(start=0.0, end=1.0, text=" Bonjour"),
                 SimpleNamespace(start=1.0, end=2.5, text=" le monde "),
@@ -139,6 +157,63 @@ def test_faster_whisper_engine_converts_segments(monkeypatch, tmp_path) -> None:
     assert result.segments[1].text == "le monde"
 
 
+def test_faster_whisper_engine_uses_requested_french_language(tmp_path) -> None:
+    class FakeWhisperModel:
+        def __init__(self) -> None:
+            self.language: str | None = "unset"
+
+        def transcribe(self, input_path: str, language: str | None, beam_size: int):
+            del input_path, beam_size
+            self.language = language
+            return [SimpleNamespace(start=0.0, end=1.0, text="Bonjour")], SimpleNamespace(language=language, duration=1.0)
+
+    model = FakeWhisperModel()
+    input_path = tmp_path / "input.mp3"
+    input_path.write_bytes(b"audio")
+
+    FasterWhisperEngine(model, default_language=None, beam_size=5).transcribe(input_path, transcription_language="fr")
+
+    assert model.language == "fr"
+
+
+def test_faster_whisper_engine_uses_requested_english_language(tmp_path) -> None:
+    class FakeWhisperModel:
+        def __init__(self) -> None:
+            self.language: str | None = "unset"
+
+        def transcribe(self, input_path: str, language: str | None, beam_size: int):
+            del input_path, beam_size
+            self.language = language
+            return [SimpleNamespace(start=0.0, end=1.0, text="Hello")], SimpleNamespace(language=language, duration=1.0)
+
+    model = FakeWhisperModel()
+    input_path = tmp_path / "input.mp3"
+    input_path.write_bytes(b"audio")
+
+    FasterWhisperEngine(model, default_language=None, beam_size=5).transcribe(input_path, transcription_language="en")
+
+    assert model.language == "en"
+
+
+def test_faster_whisper_engine_does_not_force_language_in_auto_mode(tmp_path) -> None:
+    class FakeWhisperModel:
+        def __init__(self) -> None:
+            self.language: str | None = "unset"
+
+        def transcribe(self, input_path: str, language: str | None, beam_size: int):
+            del input_path, beam_size
+            self.language = language
+            return [SimpleNamespace(start=0.0, end=1.0, text="Bonjour")], SimpleNamespace(language="fr", duration=1.0)
+
+    model = FakeWhisperModel()
+    input_path = tmp_path / "input.mp3"
+    input_path.write_bytes(b"audio")
+
+    FasterWhisperEngine(model, default_language="en", beam_size=5).transcribe(input_path, transcription_language="auto")
+
+    assert model.language is None
+
+
 def test_worker_processes_fake_job_successfully(tmp_path) -> None:
     settings = make_settings(tmp_path)
     engine = create_engine_for_settings(settings)
@@ -148,7 +223,7 @@ def test_worker_processes_fake_job_successfully(tmp_path) -> None:
     input_dir.mkdir(parents=True, exist_ok=True)
     input_path = input_dir / "test.mp3"
     input_path.write_bytes(b"audio")
-    seed_job(session_factory, input_path)
+    seed_job(session_factory, input_path, metadata={"transcription_language": "en"})
 
     process_audio_job(session_factory, FakeTranscriptionEngine(), "job-1")
 
@@ -159,11 +234,12 @@ def test_worker_processes_fake_job_successfully(tmp_path) -> None:
       assert job.result_path is not None
       result = json.loads(Path(job.result_path).read_text(encoding="utf-8"))
       assert result["text"] == "Fake transcript for testing."
+      assert result["language"] == "en"
 
 
 def test_worker_marks_job_failed_on_error(tmp_path) -> None:
     class BrokenEngine(FakeTranscriptionEngine):
-        def transcribe(self, input_path: Path):  # type: ignore[override]
+        def transcribe(self, input_path: Path, *, transcription_language: str | None = None):  # type: ignore[override]
             raise RuntimeError("boom")
 
     settings = make_settings(tmp_path)

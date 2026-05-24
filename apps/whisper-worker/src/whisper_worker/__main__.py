@@ -5,7 +5,7 @@ import logging
 import time
 
 from whisper_worker.config import get_settings
-from whisper_worker.database import Base, create_engine_for_settings, create_session_factory
+from whisper_worker.database import Base, create_engine_for_settings, create_session_factory, ensure_job_metadata_column
 from whisper_worker.engines import check_engine, create_engine, prepare_model
 from whisper_worker.processor import process_audio_job
 from whisper_worker.queue_backend import RedisQueueBackend
@@ -38,6 +38,7 @@ def run_worker_loop() -> None:
     engine = create_engine(settings)
     db_engine = create_engine_for_settings(settings)
     Base.metadata.create_all(db_engine)
+    ensure_job_metadata_column(db_engine)
     session_factory = create_session_factory(db_engine)
     queue = RedisQueueBackend(settings.redis_url, settings.queue_name)
     logger = logging.getLogger("whisper_worker")

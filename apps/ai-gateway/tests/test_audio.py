@@ -19,10 +19,18 @@ def create_token(scopes: list[str], user_id: str | None = None) -> str:
     return created_token.plain_token
 
 
-def upload_audio(client: TestClient, token: str, filename: str = "sample.mp3", content: bytes = b"audio") -> object:
+def upload_audio(
+    client: TestClient,
+    token: str,
+    filename: str = "sample.mp3",
+    content: bytes = b"audio",
+    transcription_language: str | None = None,
+) -> object:
+    data = {} if transcription_language is None else {"transcription_language": transcription_language}
     return client.post(
         "/v1/audio/transcribe",
         headers=create_bearer_header(token),
+        data=data,
         files={"file": (filename, content, "audio/mpeg")},
     )
 
@@ -71,6 +79,7 @@ def test_audio_transcribe_queues_job(client: TestClient) -> None:
     assert payload["status"] == "queued"
     assert payload["job_id"]
     assert client.fake_audio_queue.job_ids == [payload["job_id"]]
+    assert client.fake_audio_queue.messages[0]["transcription_language"] == "auto"
 
 
 def test_audio_transcribe_neutralizes_path_traversal_filename(client: TestClient) -> None:
@@ -83,6 +92,55 @@ def test_audio_transcribe_neutralizes_path_traversal_filename(client: TestClient
         job = session.get(Job, job_id)
         assert job is not None
         assert ".." not in job.input_path
+
+
+def test_audio_transcribe_defaults_transcription_language_to_auto(client: TestClient) -> None:
+    token = create_token(["audio:transcribe"])
+    response = upload_audio(client, token)
+
+    assert response.status_code in {200, 202}
+    job_id = response.json()["job_id"]
+    with get_session_factory()() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        metadata = json.loads(job.metadata_json or "{}")
+        assert metadata["transcription_language"] == "auto"
+    assert client.fake_audio_queue.messages[0]["transcription_language"] == "auto"
+
+
+def test_audio_transcribe_accepts_french_transcription_language(client: TestClient) -> None:
+    token = create_token(["audio:transcribe"])
+    response = upload_audio(client, token, transcription_language="fr")
+
+    assert response.status_code in {200, 202}
+    job_id = response.json()["job_id"]
+    with get_session_factory()() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        metadata = json.loads(job.metadata_json or "{}")
+        assert metadata["transcription_language"] == "fr"
+    assert client.fake_audio_queue.messages[0]["transcription_language"] == "fr"
+
+
+def test_audio_transcribe_accepts_english_transcription_language(client: TestClient) -> None:
+    token = create_token(["audio:transcribe"])
+    response = upload_audio(client, token, transcription_language="en")
+
+    assert response.status_code in {200, 202}
+    job_id = response.json()["job_id"]
+    with get_session_factory()() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        metadata = json.loads(job.metadata_json or "{}")
+        assert metadata["transcription_language"] == "en"
+    assert client.fake_audio_queue.messages[0]["transcription_language"] == "en"
+
+
+def test_audio_transcribe_rejects_invalid_transcription_language(client: TestClient) -> None:
+    token = create_token(["audio:transcribe"])
+    response = upload_audio(client, token, transcription_language="de")
+
+    assert response.status_code == 422
 
 
 def test_audio_transcribe_rejects_too_large_file(client: TestClient) -> None:

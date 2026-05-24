@@ -2,11 +2,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from app.audio import save_uploaded_audio
+from app.audio import sanitize_original_filename, save_uploaded_audio, validate_transcription_language
+from app.assistant import prepare_assistant_request
 from app.auth import get_current_token, require_scope
 from app.config import get_settings
 from app.database import init_db
@@ -27,6 +28,9 @@ from app.notes import prepare_summary_request
 from app.queue import AudioJobQueue, get_audio_job_queue
 from app.schemas import (
     AudioTranscriptionQueuedResponse,
+    AssistantChatRequest,
+    AssistantChatResponse,
+    AssistantUsageResponse,
     HealthResponse,
     JobResultResponse,
     JobStatusResponse,
@@ -131,6 +135,46 @@ async def summarize_note(
         usage=UsageResponse(
             prompt_chars=prepared_request.prompt_chars,
             template_chars=prepared_request.template_chars,
+        ),
+    )
+
+
+@app.post("/v1/assistant/chat", tags=["assistant"], response_model=AssistantChatResponse)
+async def assistant_chat(
+    payload: AssistantChatRequest,
+    token: Annotated[ApiToken, Depends(require_scope("assistant:chat"))],
+    llm_client: Annotated[LlmClient, Depends(get_llm_client)],
+) -> AssistantChatResponse:
+    del token
+    prepared_request = prepare_assistant_request(payload, get_settings())
+
+    try:
+        result = await llm_client.assistant_chat(
+            model=prepared_request.selected_model,
+            mode=prepared_request.mode,
+            message_chars=prepared_request.message_chars,
+            context_chars=prepared_request.context_chars,
+            system_prompt=prepared_request.system_prompt,
+            user_prompt=prepared_request.user_prompt,
+        )
+    except OllamaUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The assistant backend is currently unavailable.",
+        ) from exc
+    except OllamaResponseError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The assistant backend returned an invalid response.",
+        ) from exc
+
+    return AssistantChatResponse(
+        model=result.model,
+        mode=prepared_request.mode,
+        answer_markdown=result.content,
+        usage=AssistantUsageResponse(
+            message_chars=prepared_request.message_chars,
+            context_chars=prepared_request.context_chars,
         ),
     )
 
@@ -244,11 +288,21 @@ async def transcribe_audio(
     token: Annotated[ApiToken, Depends(require_scope("audio:transcribe"))],
     session: Annotated[Session, Depends(get_db_session)],
     queue: Annotated[AudioJobQueue, Depends(get_audio_job_queue)],
+    transcription_language: Annotated[str, Form()] = "auto",
 ) -> AudioTranscriptionQueuedResponse:
     settings = get_settings()
+    requested_language = validate_transcription_language(transcription_language)
     input_path = await save_uploaded_audio(file, settings)
-    job = create_audio_transcription_job(session, user_id=token.user_id, input_path=input_path)
-    queue.enqueue_audio_transcription(job.id)
+    job = create_audio_transcription_job(
+        session,
+        user_id=token.user_id,
+        input_path=input_path,
+        metadata={
+            "transcription_language": requested_language,
+            "original_filename": sanitize_original_filename(file.filename),
+        },
+    )
+    queue.enqueue_audio_transcription(job.id, input_path=input_path, transcription_language=requested_language)
     return AudioTranscriptionQueuedResponse(job_id=job.id, status=job.status)
 
 

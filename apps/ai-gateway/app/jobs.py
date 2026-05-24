@@ -18,7 +18,37 @@ JOB_STATUS_COMPLETED = "completed"
 JOB_STATUS_FAILED = "failed"
 
 
-def create_audio_transcription_job(session: Session, *, user_id: str, input_path: str) -> Job:
+def encode_job_metadata(metadata: dict[str, object] | None) -> str | None:
+    if not metadata:
+        return None
+    return json.dumps(metadata, separators=(",", ":"), sort_keys=True)
+
+
+def decode_job_metadata(job: Job) -> dict[str, object]:
+    if not job.metadata_json:
+        return {}
+    try:
+        decoded = json.loads(job.metadata_json)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def get_job_transcription_language(job: Job) -> str:
+    metadata = decode_job_metadata(job)
+    language = metadata.get("transcription_language")
+    if language in {"auto", "fr", "en"}:
+        return str(language)
+    return "auto"
+
+
+def create_audio_transcription_job(
+    session: Session,
+    *,
+    user_id: str,
+    input_path: str,
+    metadata: dict[str, object] | None = None,
+) -> Job:
     now = utc_now()
     job = Job(
         id=str(uuid.uuid4()),
@@ -28,6 +58,7 @@ def create_audio_transcription_job(session: Session, *, user_id: str, input_path
         input_path=input_path,
         result_path=None,
         error=None,
+        metadata_json=encode_job_metadata(metadata),
         created_at=now,
         updated_at=now,
     )

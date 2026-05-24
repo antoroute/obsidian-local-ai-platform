@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -19,7 +20,10 @@ def process_audio_job(session_factory: sessionmaker[Session], engine: Transcript
         now = _utc_now()
         try:
             mark_job_processing(session, job, now)
-            transcript = engine.transcribe(Path(job.input_path))
+            transcript = engine.transcribe(
+                Path(job.input_path),
+                transcription_language=get_job_transcription_language(job),
+            )
             result_path = write_result_file(job, transcript.to_dict())
             mark_job_completed(session, job, result_path, _utc_now())
         except Exception as exc:
@@ -39,3 +43,21 @@ def _utc_now():
     from datetime import UTC, datetime
 
     return datetime.now(UTC)
+
+
+def get_job_transcription_language(job: Job) -> str:
+    metadata = _decode_job_metadata(job)
+    language = metadata.get("transcription_language")
+    if language in {"auto", "fr", "en"}:
+        return str(language)
+    return "auto"
+
+
+def _decode_job_metadata(job: Job) -> dict[str, Any]:
+    if not job.metadata_json:
+        return {}
+    try:
+        decoded = json.loads(job.metadata_json)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}

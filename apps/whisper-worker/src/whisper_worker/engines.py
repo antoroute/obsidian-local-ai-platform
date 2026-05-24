@@ -9,16 +9,17 @@ from whisper_worker.repositories import TranscriptResult, TranscriptSegment
 
 
 class TranscriptionEngine:
-    def transcribe(self, input_path: Path) -> TranscriptResult:
+    def transcribe(self, input_path: Path, *, transcription_language: str | None = None) -> TranscriptResult:
         raise NotImplementedError
 
 
 class FakeTranscriptionEngine(TranscriptionEngine):
-    def transcribe(self, input_path: Path) -> TranscriptResult:
+    def transcribe(self, input_path: Path, *, transcription_language: str | None = None) -> TranscriptResult:
         del input_path
+        language = _resolve_fake_language(transcription_language)
         return TranscriptResult(
             text="Fake transcript for testing.",
-            language="fr",
+            language=language,
             duration=0,
             segments=[TranscriptSegment(start=0, end=1, text="Fake transcript for testing.")],
         )
@@ -40,23 +41,24 @@ class FasterWhisperEngine(TranscriptionEngine):
         self._default_language = default_language
         self._beam_size = beam_size
 
-    def transcribe(self, input_path: Path) -> TranscriptResult:
+    def transcribe(self, input_path: Path, *, transcription_language: str | None = None) -> TranscriptResult:
         if not input_path.exists():
             raise FileNotFoundError("Audio input file is missing.")
 
+        language = _resolve_faster_whisper_language(transcription_language, self._default_language)
         segments_iterable, info = self._model.transcribe(
             str(input_path),
-            language=self._default_language,
+            language=language,
             beam_size=self._beam_size,
         )
         segments = list(segments_iterable)
         text = " ".join(segment.text.strip() for segment in segments if getattr(segment, "text", "").strip()).strip()
-        language = getattr(info, "language", None) or self._default_language or "unknown"
+        result_language = getattr(info, "language", None) or language or "unknown"
         duration = float(getattr(info, "duration", 0) or 0)
 
         return TranscriptResult(
             text=text,
-            language=str(language),
+            language=str(result_language),
             duration=duration,
             segments=[
                 TranscriptSegment(
@@ -67,6 +69,20 @@ class FasterWhisperEngine(TranscriptionEngine):
                 for segment in segments
             ],
         )
+
+
+def _resolve_fake_language(transcription_language: str | None) -> str:
+    if transcription_language in {"fr", "en"}:
+        return transcription_language
+    return "fr"
+
+
+def _resolve_faster_whisper_language(transcription_language: str | None, default_language: str | None) -> str | None:
+    if transcription_language == "auto":
+        return None
+    if transcription_language in {"fr", "en"}:
+        return transcription_language
+    return default_language
 
 
 def create_engine(settings: WorkerSettings) -> TranscriptionEngine:

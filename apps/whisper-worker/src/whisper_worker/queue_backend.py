@@ -9,6 +9,8 @@ from redis import Redis
 @dataclass(frozen=True)
 class AudioJobMessage:
     job_id: str
+    input_path: str | None = None
+    transcription_language: str = "auto"
 
 
 class QueueBackend:
@@ -27,4 +29,8 @@ class RedisQueueBackend(QueueBackend):
             return None
         _, payload = result
         message = json.loads(payload)
-        return AudioJobMessage(job_id=message["job_id"])
+        return AudioJobMessage(
+            job_id=message["job_id"],
+            input_path=message.get("input_path"),
+            transcription_language=message.get("transcription_language", "auto"),
+        )

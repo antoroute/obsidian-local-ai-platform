@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     max_transcript_chars: int = Field(default=300000, alias="MAX_TRANSCRIPT_CHARS")
     max_manual_notes_chars: int = Field(default=100000, alias="MAX_MANUAL_NOTES_CHARS")
     max_participants: int = Field(default=100, alias="MAX_PARTICIPANTS")
+    max_assistant_message_chars: int = Field(default=20000, alias="MAX_ASSISTANT_MESSAGE_CHARS")
+    max_assistant_context_chars: int = Field(default=100000, alias="MAX_ASSISTANT_CONTEXT_CHARS")
     redis_url: str = Field(default="redis://redis:6379/0", alias="AI_GATEWAY_REDIS_URL")
     audio_storage_dir: str = Field(default="./data/audio", alias="AUDIO_STORAGE_DIR")
     max_audio_upload_mb: int = Field(default=500, alias="MAX_AUDIO_UPLOAD_MB")

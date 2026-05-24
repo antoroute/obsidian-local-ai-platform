@@ -8,6 +8,7 @@ from fastapi import HTTPException, UploadFile, status
 from app.config import Settings
 
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".webm", ".ogg"}
+ALLOWED_TRANSCRIPTION_LANGUAGES = {"auto", "fr", "en"}
 CHUNK_SIZE = 1024 * 1024
 
 
@@ -19,6 +20,22 @@ def validate_audio_filename(filename: str | None) -> str:
     if extension not in ALLOWED_AUDIO_EXTENSIONS:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Unsupported audio file extension.")
     return extension
+
+
+def sanitize_original_filename(filename: str | None) -> str | None:
+    if not filename:
+        return None
+    return Path(filename).name
+
+
+def validate_transcription_language(value: str | None) -> str:
+    language = (value or "auto").strip().lower()
+    if language not in ALLOWED_TRANSCRIPTION_LANGUAGES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="transcription_language must be one of: auto, fr, en.",
+        )
+    return language
 
 
 async def save_uploaded_audio(upload: UploadFile, settings: Settings) -> str:

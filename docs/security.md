@@ -59,6 +59,15 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - Oversized notes and templates are rejected before any upstream call
 - The gateway should never log full note contents, raw bearer tokens, or `Authorization` headers
 
+## Assistant safeguards
+
+- `POST /v1/assistant/chat` requires the `assistant:chat` scope
+- requested models outside the allowlist are rejected before any Ollama call
+- `message` and `context` are bounded by `MAX_ASSISTANT_MESSAGE_CHARS` and `MAX_ASSISTANT_CONTEXT_CHARS`
+- correction and rewriting prompts instruct the model to preserve meaning and avoid unsupported additions
+- assistant requests must not log full selected text, note context, raw bearer tokens, or `Authorization` headers
+- the assistant endpoint is a controlled task endpoint, not a generic Ollama proxy
+
 ## Meeting generation safeguards
 
 - `POST /v1/meetings/generate` requires the `meetings:generate` scope
@@ -68,6 +77,8 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - manual notes and transcript are merged with explicit prompt rules to avoid invention
 - manual notes are treated as the priority source for names, acronyms, dates, decisions, and action items
 - the prompt explicitly requires uncertainties and contradictions to be surfaced
+- the optional `output_language` field only changes the generation instruction (`same_as_meeting`, `fr`, or `en`)
+- language selection must not weaken confidentiality rules: full transcripts and manual notes still must not be logged
 - the gateway should never log full meeting bodies, full transcripts, or manual notes
 - job-backed meeting generation is isolated by `user_id`, so one user cannot generate a meeting report from another user's transcription job
 - internal `input_path` and `result_path` values must never be exposed in API responses
@@ -78,6 +89,8 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - `POST /v1/audio/transcribe` requires the `audio:transcribe` scope
 - only `.wav`, `.mp3`, `.m4a`, `.webm`, and `.ogg` uploads are accepted
 - audio uploads are bounded by `MAX_AUDIO_UPLOAD_MB`
+- `transcription_language` is strictly limited to `auto`, `fr`, or `en`
+- the requested transcription language is stored as job metadata and consumed by the worker
 - uploaded files are stored with generated internal filenames
 - original filenames must not be used as storage paths
 - absolute filesystem paths are never returned in API responses

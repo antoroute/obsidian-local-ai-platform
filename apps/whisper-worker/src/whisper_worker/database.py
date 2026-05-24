@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -18,3 +18,14 @@ def create_engine_for_settings(settings: WorkerSettings) -> Engine:
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+def ensure_job_metadata_column(engine: Engine) -> None:
+    inspector = inspect(engine)
+    if "jobs" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("jobs")}
+    if "metadata_json" in columns:
+        return
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE jobs ADD COLUMN metadata_json TEXT"))
