@@ -1,0 +1,28 @@
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PATH="/opt/venv/bin:${PATH}"
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libcublas-12-4 \
+        python3.11 \
+        python3.11-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN find /usr/local /usr/lib -name "libcublas.so.12*" -print -quit | grep -q .
+
+RUN python3.11 -m venv /opt/venv \
+    && pip install --no-cache-dir --upgrade pip setuptools wheel
+
+COPY pyproject.toml ./
+COPY src ./src
+
+RUN pip install --no-cache-dir .[faster-whisper]
+
+CMD ["python", "-m", "whisper_worker"]

@@ -16,6 +16,9 @@ class WorkerSettings:
     whisper_compute_type: str
     whisper_language: str | None
     whisper_beam_size: int
+    whisper_model_cache_dir: str
+    hf_home: str | None
+    huggingface_hub_cache: str | None
 
 
 def get_settings() -> WorkerSettings:
@@ -30,4 +33,7 @@ def get_settings() -> WorkerSettings:
         whisper_compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "int8"),
         whisper_language=os.getenv("WHISPER_LANGUAGE") or None,
         whisper_beam_size=int(os.getenv("WHISPER_BEAM_SIZE", "5")),
+        whisper_model_cache_dir=os.getenv("WHISPER_MODEL_CACHE_DIR", "/models/whisper"),
+        hf_home=os.getenv("HF_HOME") or None,
+        huggingface_hub_cache=os.getenv("HUGGINGFACE_HUB_CACHE") or None,
     )

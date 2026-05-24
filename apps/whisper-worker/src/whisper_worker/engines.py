@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,16 @@ class FakeTranscriptionEngine(TranscriptionEngine):
             duration=0,
             segments=[TranscriptSegment(start=0, end=1, text="Fake transcript for testing.")],
         )
+
+
+@dataclass(frozen=True)
+class EngineCheckResult:
+    engine_name: str
+    model_size: str
+    device: str
+    compute_type: str
+    cache_dir: str
+    message: str
 
 
 class FasterWhisperEngine(TranscriptionEngine):
@@ -73,6 +84,42 @@ def create_engine(settings: WorkerSettings) -> TranscriptionEngine:
     raise ValueError(f"Unsupported transcription engine: {settings.transcription_engine}")
 
 
+def check_engine(settings: WorkerSettings) -> EngineCheckResult:
+    engine = create_engine(settings)
+    del engine
+    return EngineCheckResult(
+        engine_name=settings.transcription_engine,
+        model_size=settings.whisper_model_size,
+        device=settings.whisper_device,
+        compute_type=settings.whisper_compute_type,
+        cache_dir=settings.whisper_model_cache_dir,
+        message="Transcription engine loaded successfully.",
+    )
+
+
+def prepare_model(settings: WorkerSettings, *, model_size: str | None = None) -> Path:
+    selected_model = model_size or settings.whisper_model_size
+    cache_dir = Path(settings.whisper_model_cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    if settings.transcription_engine != "faster_whisper":
+        raise RuntimeError("Model preparation is only applicable to TRANSCRIPTION_ENGINE=faster_whisper.")
+
+    try:
+        from faster_whisper.utils import download_model
+    except ImportError as exc:
+        raise RuntimeError(
+            "Preparing a faster-whisper model requires the faster-whisper package to be installed."
+        ) from exc
+
+    try:
+        model_path = download_model(selected_model, cache_dir=str(cache_dir))
+    except Exception as exc:
+        raise normalize_faster_whisper_error(exc) from exc
+
+    return Path(model_path)
+
+
 def _build_faster_whisper_model(settings: WorkerSettings) -> Any:
     try:
         from faster_whisper import WhisperModel
@@ -84,11 +131,27 @@ def _build_faster_whisper_model(settings: WorkerSettings) -> Any:
     if settings.whisper_device == "cuda":
         _ensure_cuda_available()
 
-    return WhisperModel(
-        settings.whisper_model_size,
-        device=settings.whisper_device,
-        compute_type=settings.whisper_compute_type,
-    )
+    cache_dir = Path(settings.whisper_model_cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        try:
+            return WhisperModel(
+                settings.whisper_model_size,
+                device=settings.whisper_device,
+                compute_type=settings.whisper_compute_type,
+                download_root=str(cache_dir),
+            )
+        except TypeError as exc:
+            if "download_root" not in str(exc):
+                raise
+            return WhisperModel(
+                settings.whisper_model_size,
+                device=settings.whisper_device,
+                compute_type=settings.whisper_compute_type,
+            )
+    except Exception as exc:
+        raise normalize_faster_whisper_error(exc) from exc
 
 
 def _ensure_cuda_available() -> None:
@@ -101,3 +164,37 @@ def _ensure_cuda_available() -> None:
 
     if ctranslate2.get_cuda_device_count() < 1:
         raise RuntimeError("WHISPER_DEVICE=cuda was requested but no CUDA device is available.")
+
+
+def normalize_faster_whisper_error(exc: Exception) -> RuntimeError:
+    message = collect_exception_messages(exc)
+
+    if "localentrynotfounderror" in message or "whisper model is not available locally" in message:
+        return RuntimeError(
+            "Whisper model is not available locally. Run scripts/prod/prepare-whisper-model.ps1 or allow worker network access to download it."
+        )
+    if "temporary failure in name resolution" in message or "name or service not known" in message:
+        return RuntimeError(
+            "Whisper model download failed because Hugging Face could not be resolved. Run scripts/prod/prepare-whisper-model.ps1 with worker network access, or fix container DNS/network access."
+        )
+    if "connection refused" in message:
+        return RuntimeError(
+            "Whisper model download failed because the remote service refused the connection. Check outbound connectivity from the worker container."
+        )
+    if "cuda" in message and "available" in message:
+        return RuntimeError("WHISPER_DEVICE=cuda was requested but no CUDA device is available.")
+
+    return RuntimeError(str(exc))
+
+
+def collect_exception_messages(exc: BaseException) -> str:
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = f"{type(current).__name__}: {current}".strip().lower()
+        if text:
+            parts.append(text)
+        current = current.__cause__ or current.__context__
+    return " | ".join(parts)

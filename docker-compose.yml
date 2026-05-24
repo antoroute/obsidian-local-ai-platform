@@ -102,6 +102,9 @@ services:
       WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-fr}
       WHISPER_BEAM_SIZE: ${WHISPER_BEAM_SIZE:-5}
+      WHISPER_MODEL_CACHE_DIR: ${WHISPER_MODEL_CACHE_DIR:-/models/whisper}
+      HF_HOME: ${HF_HOME:-/models/whisper}
+      HUGGINGFACE_HUB_CACHE: ${HUGGINGFACE_HUB_CACHE:-/models/whisper/hub}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     depends_on:
@@ -113,9 +116,7 @@ services:
       - ai_internal
     volumes:
       - audio-storage:/data/audio
-    gpus:
-      - driver: nvidia
-        count: all
+      - whisper-model-cache:/models/whisper
     restart: unless-stopped
 
   postgres:
@@ -158,9 +159,6 @@ services:
       - ai_internal
     expose:
       - "11434"
-    gpus:
-      - driver: nvidia
-        count: all
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s
@@ -178,5 +176,6 @@ networks:
 
 volumes:
   audio-storage:
+  whisper-model-cache:
   postgres-data:
   ollama-data:

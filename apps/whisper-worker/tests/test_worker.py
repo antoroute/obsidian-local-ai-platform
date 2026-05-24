@@ -5,7 +5,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 from whisper_worker.database import Base, create_engine_for_settings, create_session_factory
-from whisper_worker.engines import FakeTranscriptionEngine, FasterWhisperEngine, create_engine
+from whisper_worker.engines import FakeTranscriptionEngine, FasterWhisperEngine, check_engine, create_engine, normalize_faster_whisper_error
 from whisper_worker.models import Job
 from whisper_worker.processor import process_audio_job
 from whisper_worker.repositories import JOB_STATUS_COMPLETED, JOB_STATUS_FAILED
@@ -24,6 +24,9 @@ def make_settings(tmp_path) -> WorkerSettings:
         whisper_compute_type="int8",
         whisper_language=None,
         whisper_beam_size=5,
+        whisper_model_cache_dir=str(tmp_path / "model-cache"),
+        hf_home=str(tmp_path / "model-cache"),
+        huggingface_hub_cache=str(tmp_path / "model-cache" / "hub"),
     )
 
 
@@ -73,6 +76,9 @@ def test_engine_factory_rejects_unknown_value(tmp_path) -> None:
         whisper_compute_type="int8",
         whisper_language=None,
         whisper_beam_size=5,
+        whisper_model_cache_dir=str(tmp_path / "model-cache"),
+        hf_home=str(tmp_path / "model-cache"),
+        huggingface_hub_cache=str(tmp_path / "model-cache" / "hub"),
     )
 
     try:
@@ -114,6 +120,9 @@ def test_faster_whisper_engine_converts_segments(monkeypatch, tmp_path) -> None:
         whisper_compute_type="int8",
         whisper_language="fr",
         whisper_beam_size=5,
+        whisper_model_cache_dir=str(tmp_path / "model-cache"),
+        hf_home=str(tmp_path / "model-cache"),
+        huggingface_hub_cache=str(tmp_path / "model-cache" / "hub"),
     )
 
     engine = create_engine(settings)
@@ -174,3 +183,18 @@ def test_worker_marks_job_failed_on_error(tmp_path) -> None:
       assert job is not None
       assert job.status == JOB_STATUS_FAILED
       assert job.error == "boom"
+
+
+def test_check_engine_reports_success_for_fake_engine(tmp_path) -> None:
+    result = check_engine(make_settings(tmp_path))
+
+    assert result.engine_name == "fake"
+    assert "loaded successfully" in result.message
+
+
+def test_normalize_faster_whisper_error_reports_missing_model() -> None:
+    error = RuntimeError("huggingface_hub.errors.LocalEntryNotFoundError: model missing")
+
+    normalized = normalize_faster_whisper_error(error)
+
+    assert "Whisper model is not available locally." in str(normalized)

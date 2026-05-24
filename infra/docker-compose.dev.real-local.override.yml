@@ -1,0 +1,50 @@
+services:
+  reverse-proxy:
+    profiles:
+      - container-proxy
+    ports: []
+
+  ai-gateway:
+    depends_on:
+      ollama:
+        condition: service_started
+        required: false
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      LLM_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      DEFAULT_MODEL: mistral:latest
+      ALLOWED_MODELS: qwen2.5:14b,mistral:latest,llama3:latest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - host_access
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  whisper-worker:
+    environment:
+      TRANSCRIPTION_ENGINE: faster_whisper
+      WHISPER_MODEL_SIZE: medium
+      WHISPER_DEVICE: cuda
+      WHISPER_COMPUTE_TYPE: float16
+      WHISPER_LANGUAGE: fr
+      WHISPER_MODEL_CACHE_DIR: /models/whisper
+      HF_HOME: /models/whisper
+      HUGGINGFACE_HUB_CACHE: /models/whisper/hub
+    networks:
+      - host_access
+    gpus:
+      - driver: nvidia
+        count: all
+
+  ollama:
+    profiles:
+      - container-ollama
+
+networks:
+  host_access:
+    driver: bridge

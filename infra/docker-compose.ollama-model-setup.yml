@@ -1,0 +1,13 @@
+services:
+  reverse-proxy:
+    profiles:
+      - container-proxy
+    ports: []
+
+  ollama:
+    networks:
+      - ollama_model_setup_access
+
+networks:
+  ollama_model_setup_access:
+    driver: bridge

@@ -1,5 +1,6 @@
 import {
   App,
+  ItemView,
   Modal,
   Notice,
   Plugin,
@@ -7,23 +8,26 @@ import {
   Setting,
   TAbstractFile,
   TFile,
+  WorkspaceLeaf,
   normalizePath,
   requestUrl,
 } from "obsidian";
 
-const DEFAULT_TEMPLATE_FILE = "compte-rendu-standard.md";
-const DEFAULT_OUTPUT_FOLDER = "AI Summaries";
-const DEFAULT_MEETINGS_FOLDER = "Meetings";
-const DEFAULT_RECORDINGS_FOLDER = "AI Recordings";
+const DASHBOARD_VIEW_TYPE = "notre-compagnon-dashboard";
+const DEFAULT_TEMPLATE_FILE = "compte-rendu-standard-fr.md";
+const DEFAULT_TEMPLATES_FOLDER = "Compagnon/Templates";
+const DEFAULT_OUTPUT_FOLDER = "Compagnon/Comptes rendus";
+const DEFAULT_MEETINGS_FOLDER = "Compagnon/Reunions";
+const DEFAULT_RECORDINGS_FOLDER = "Compagnon/Enregistrements";
 const DEFAULT_MODEL = "qwen2.5:14b";
 const AUDIO_POLL_INTERVAL_MS = 3_000;
 const AUDIO_POLL_TIMEOUT_MS = 30 * 60 * 1_000;
 const DEFAULT_RECORDING_EXTENSION = ".webm";
 const DEFAULT_RECORDING_MIME_TYPE = "audio/webm";
 const SUPPORTED_AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".webm", ".ogg"]);
-const FALLBACK_TEMPLATE = `# Summary
+const FALLBACK_TEMPLATE = `# Compte rendu
 
-## Key points
+## Resume executif
 
 - 
 
@@ -31,13 +35,13 @@ const FALLBACK_TEMPLATE = `# Summary
 
 - 
 
-## Action items
+## Actions a suivre
 
 - 
 
-## Risks or uncertainties
+## Incertitudes
 
-- Mention any unclear or missing information explicitly.
+- Signaler les points flous ou manquants.
 `;
 
 class UserFacingError extends Error {}
@@ -102,6 +106,9 @@ interface TemplateChoice {
   label: string;
   templateContent: string;
   sourcePath: string | null;
+  description: string | null;
+  language: string | null;
+  type: string | null;
 }
 
 interface MeetingMetadata {
@@ -141,16 +148,20 @@ interface PluginSettings {
   outputFolder: string;
   meetingsFolder: string;
   recordingsFolder: string;
+  transcriptionLanguage: "auto" | "fr" | "en";
+  outputLanguage: "same_as_meeting" | "fr" | "en";
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
   apiBaseUrl: "",
   apiToken: "",
   defaultModel: DEFAULT_MODEL,
-  templatesFolder: "Templates",
+  templatesFolder: DEFAULT_TEMPLATES_FOLDER,
   outputFolder: DEFAULT_OUTPUT_FOLDER,
   meetingsFolder: DEFAULT_MEETINGS_FOLDER,
   recordingsFolder: DEFAULT_RECORDINGS_FOLDER,
+  transcriptionLanguage: "auto",
+  outputLanguage: "same_as_meeting",
 };
 
 export default class LocalAiPlatformPlugin extends Plugin {
@@ -160,35 +171,59 @@ export default class LocalAiPlatformPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
 
+    this.registerView(DASHBOARD_VIEW_TYPE, (leaf) => new NotreCompagnonDashboardView(leaf, this));
     this.addSettingTab(new LocalAiPlatformSettingTab(this.app, this));
     this.addCommand({
+      id: "open-dashboard",
+      name: "Notre Compagnon: Open dashboard",
+      callback: async () => {
+        await this.openDashboard();
+      },
+    });
+    this.addCommand({
       id: "summarize-current-note",
-      name: "AI Meeting Assistant: Summarize current note",
+      name: "Notre Compagnon: Summarize current note",
       callback: async () => {
         await this.summarizeCurrentNote();
       },
     });
     this.addCommand({
       id: "generate-meeting-minutes-from-audio-file",
-      name: "AI Meeting Assistant: Generate meeting minutes from audio file",
+      name: "Notre Compagnon: Generate minutes from audio file",
       callback: async () => {
         await this.generateMeetingMinutesFromAudioFile();
       },
     });
     this.addCommand({
       id: "start-meeting-recording",
-      name: "AI Meeting Assistant: Start meeting recording",
+      name: "Notre Compagnon: Start meeting recording",
       callback: async () => {
         await this.startMeetingRecording();
       },
     });
     this.addCommand({
       id: "stop-recording-and-generate-meeting-minutes",
-      name: "AI Meeting Assistant: Stop recording and generate meeting minutes",
+      name: "Notre Compagnon: Stop recording and generate minutes",
       callback: async () => {
         await this.stopRecordingAndGenerateMeetingMinutes();
       },
     });
+  }
+
+  onunload(): void {
+    this.app.workspace.detachLeavesOfType(DASHBOARD_VIEW_TYPE);
+  }
+
+  async openDashboard(): Promise<void> {
+    const existingLeaf = this.app.workspace.getLeavesOfType(DASHBOARD_VIEW_TYPE)[0];
+    if (existingLeaf) {
+      this.app.workspace.revealLeaf(existingLeaf);
+      return;
+    }
+
+    const leaf = this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf(true);
+    await leaf.setViewState({ type: DASHBOARD_VIEW_TYPE, active: true });
+    this.app.workspace.revealLeaf(leaf);
   }
 
   async loadSettings(): Promise<void> {
@@ -220,15 +255,15 @@ export default class LocalAiPlatformPlugin extends Plugin {
       const payload: SummarizeRequestPayload = {
         title: activeFile.basename,
         note_content: noteContent,
-        template: templateChoice.templateContent,
+        template: this.prepareTemplateForRequest(templateChoice),
         model: this.getDefaultModel(),
       };
 
-      new Notice("Generating AI summary...");
+      new Notice("Notre Compagnon is generating the summary...");
       const result = await this.requestSummary(apiBaseUrl, apiToken, payload);
       const outputFile = await this.writeSummaryNote(activeFile, result, templateChoice);
 
-      new Notice(`AI summary created: ${outputFile.path}`);
+      new Notice(`Summary created: ${outputFile.path}`);
     } catch (error) {
       this.showUserFacingError(error);
     }
@@ -248,6 +283,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       ensureSupportedAudioFile(audioFile.name);
       new Notice(`Uploading audio: ${audioFile.name}`);
       const queuedJob = await this.uploadAudio(apiBaseUrl, apiToken, audioFile);
+      new Notice("Audio uploaded.");
       const completedJob = await this.pollAudioJob(apiBaseUrl, apiToken, queuedJob.job_id);
       if (completedJob.status !== "completed") {
         throw new UserFacingError("The audio job did not complete successfully.");
@@ -255,13 +291,13 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
       const metadata = await promptForMeetingMetadata(this.app, stripFileExtension(audioFile.name));
       const templateChoice = await this.chooseTemplate();
-      new Notice("Generating meeting minutes...");
+      new Notice("Generating minutes...");
       const result = await this.requestMeetingFromJob(apiBaseUrl, apiToken, {
         job_id: queuedJob.job_id,
         title: metadata.title,
         manual_notes: metadata.manualNotes,
         participants: [],
-        template: templateChoice.templateContent,
+        template: this.prepareTemplateForRequest(templateChoice),
         model: this.getDefaultModel(),
       });
 
@@ -270,7 +306,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         templateChoice,
         sourceAudioName: audioFile.name,
       });
-      new Notice(`Meeting minutes created: ${outputFile.path}`);
+      new Notice(`Minutes created: ${outputFile.path}`);
     } catch (error) {
       this.showUserFacingError(error);
     }
@@ -282,7 +318,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       this.ensureMediaRecorderAvailable();
 
       if (this.activeRecording) {
-        throw new UserFacingError("A meeting recording is already in progress.");
+        throw new UserFacingError("A recording is already in progress.");
       }
 
       const metadata = await promptForRecordingTitle(this.app);
@@ -325,7 +361,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
           chunks,
         };
 
-        new Notice(`Recording started for "${metadata.title}".`, 6000);
+        new Notice(`Recording started: ${metadata.title}`, 6000);
       } catch (error) {
         stopMediaStream(stream);
         throw error;
@@ -352,24 +388,26 @@ export default class LocalAiPlatformPlugin extends Plugin {
       }
 
       const savedAudio = await this.saveRecordingToVault(recording);
+      new Notice(`Recording saved: ${savedAudio.file.path}`);
       const sourceNote = await this.completeMeetingSourceNote(recording, savedAudio.file);
       const manualNotes = await this.app.vault.read(sourceNote);
       const templateChoice = await this.chooseTemplate();
 
       const apiBaseUrl = this.getApiBaseUrl();
       const apiToken = this.getApiToken();
-      new Notice(`Uploading recording: ${savedAudio.file.name}`);
+      new Notice(`Uploading audio: ${savedAudio.file.name}`);
       const uploadFile = createFileFromBlob(savedAudio.blob, savedAudio.file.name, recording.mimeType);
       const queuedJob = await this.uploadAudio(apiBaseUrl, apiToken, uploadFile);
+      new Notice("Audio uploaded.");
       await this.pollAudioJob(apiBaseUrl, apiToken, queuedJob.job_id);
 
-      new Notice("Generating meeting minutes...");
+      new Notice("Generating minutes...");
       const result = await this.requestMeetingFromJob(apiBaseUrl, apiToken, {
         job_id: queuedJob.job_id,
         title: recording.title,
         manual_notes: manualNotes,
         participants: [],
-        template: templateChoice.templateContent,
+        template: this.prepareTemplateForRequest(templateChoice),
         model: this.getDefaultModel(),
       });
 
@@ -382,7 +420,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         generatedAt: new Date(),
       });
 
-      new Notice(`Meeting minutes created: ${outputFile.path}`);
+      new Notice(`Minutes created: ${outputFile.path}`);
     } catch (error) {
       this.showUserFacingError(error);
     }
@@ -426,7 +464,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
   }
 
   getTemplatesFolder(): string {
-    return normalizePath(this.settings.templatesFolder.trim() || "Templates");
+    return normalizePath(this.settings.templatesFolder.trim() || DEFAULT_TEMPLATES_FOLDER);
   }
 
   getOutputFolder(): string {
@@ -451,6 +489,52 @@ export default class LocalAiPlatformPlugin extends Plugin {
       throw new UserFacingError("Missing recordings folder.");
     }
     return normalizePath(value);
+  }
+
+  getOutputLanguage(): "same_as_meeting" | "fr" | "en" {
+    return this.settings.outputLanguage || "same_as_meeting";
+  }
+
+  getTranscriptionLanguage(): "auto" | "fr" | "en" {
+    return this.settings.transcriptionLanguage || "auto";
+  }
+
+  prepareTemplateForRequest(templateChoice: TemplateChoice): string {
+    return [
+      templateChoice.templateContent.trim(),
+      buildTranscriptionLanguageHint(this.getTranscriptionLanguage()),
+      buildLanguageInstruction(this.getOutputLanguage()),
+    ].join("\n\n").trim();
+  }
+
+  getConfigurationStatus(): { label: string; isReady: boolean } {
+    const missing: string[] = [];
+    if (!this.settings.apiBaseUrl.trim()) missing.push("API Base URL");
+    if (!this.settings.apiToken.trim()) missing.push("API Token");
+    if (!this.settings.defaultModel.trim()) missing.push("Default model");
+    if (!this.settings.outputFolder.trim()) missing.push("Output folder");
+
+    if (missing.length > 0) {
+      return { label: `Missing: ${missing.join(", ")}`, isReady: false };
+    }
+    return { label: "Ready", isReady: true };
+  }
+
+  async openConfiguredFolder(folderPath: string): Promise<void> {
+    const normalized = normalizePath(folderPath);
+    await ensureFolderExists(this.app, normalized);
+    const folder = this.app.vault.getAbstractFileByPath(normalized);
+    if (!folder) {
+      throw new UserFacingError(`Folder unavailable: ${normalized}`);
+    }
+
+    const firstMarkdownFile = collectMarkdownFiles(folder).sort((left, right) => left.path.localeCompare(right.path))[0];
+    if (firstMarkdownFile) {
+      await this.app.workspace.getLeaf(true).openFile(firstMarkdownFile);
+      return;
+    }
+
+    new Notice(`Folder ready: ${normalized}`);
   }
 
   ensureMediaRecorderAvailable(): void {
@@ -481,6 +565,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
         label: "Built-in default template",
         templateContent: FALLBACK_TEMPLATE,
         sourcePath: null,
+        description: "Fallback template bundled with Notre Compagnon.",
+        language: "fr",
+        type: "meeting",
       },
     ];
     const templatesFolder = this.getTemplatesFolder();
@@ -496,10 +583,14 @@ export default class LocalAiPlatformPlugin extends Plugin {
     const markdownFiles = collectMarkdownFiles(folder).sort((left, right) => left.path.localeCompare(right.path));
     for (const file of markdownFiles) {
       const content = await this.app.vault.read(file);
+      const parsedTemplate = parseTemplateContent(content);
       choices.push({
-        label: file.basename,
-        templateContent: content.trim() ? content : FALLBACK_TEMPLATE,
+        label: parsedTemplate.metadata.name || file.basename,
+        templateContent: parsedTemplate.body.trim() ? parsedTemplate.body : FALLBACK_TEMPLATE,
         sourcePath: file.path,
+        description: parsedTemplate.metadata.description,
+        language: parsedTemplate.metadata.language,
+        type: parsedTemplate.metadata.type,
       });
     }
 
@@ -642,7 +733,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       const payload = this.parseJobStatusResponse(responseText);
       if (payload.status !== lastStatus) {
         lastStatus = payload.status;
-        new Notice(`Audio transcription job ${payload.status}.`, 4000);
+        new Notice(formatJobStatusNotice(payload.status), 4000);
       }
 
       if (payload.status === "completed") {
@@ -778,13 +869,14 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
     const date = formatDate(new Date());
     const safeTitle = sanitizeFileName(sourceFile.basename);
-    const outputPath = normalizePath(`${outputFolder}/${date} - AI Summary - ${safeTitle}.md`);
+    const outputPath = normalizePath(`${outputFolder}/${date} - Notre Compagnon Summary - ${safeTitle}.md`);
     const sourceLink = this.app.metadataCache.fileToLinktext(sourceFile, "", true);
     const noteContent = buildSummaryNote({
       title: response.title || sourceFile.basename,
       sourceLink,
       model: response.model,
       templateLabel: templateChoice.label,
+      outputLanguage: this.getOutputLanguage(),
       summaryMarkdown: response.summary_markdown,
       generatedAt: new Date(),
     });
@@ -819,6 +911,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       generatedAt,
       model: input.response.model,
       templateLabel: input.templateChoice.label,
+      outputLanguage: this.getOutputLanguage(),
       jobId: input.response.job_id,
       audioFileName: input.sourceAudioName,
       sourceMeetingLink,
@@ -917,6 +1010,79 @@ export default class LocalAiPlatformPlugin extends Plugin {
   }
 }
 
+class NotreCompagnonDashboardView extends ItemView {
+  private readonly plugin: LocalAiPlatformPlugin;
+
+  constructor(leaf: WorkspaceLeaf, plugin: LocalAiPlatformPlugin) {
+    super(leaf);
+    this.plugin = plugin;
+  }
+
+  getViewType(): string {
+    return DASHBOARD_VIEW_TYPE;
+  }
+
+  getDisplayText(): string {
+    return "Notre Compagnon";
+  }
+
+  async onOpen(): Promise<void> {
+    this.render();
+  }
+
+  async onClose(): Promise<void> {
+    this.contentEl.empty();
+  }
+
+  render(): void {
+    const container = this.contentEl;
+    container.empty();
+    container.addClass("notre-compagnon-dashboard");
+    container.createEl("h2", { text: "Notre Compagnon" });
+
+    const status = this.plugin.getConfigurationStatus();
+    new Setting(container)
+      .setName("Configuration")
+      .setDesc(status.label)
+      .addButton((button) =>
+        button.setButtonText("Test connection").onClick(async () => {
+          await this.plugin.testConnection();
+        }),
+      );
+
+    new Setting(container).setName("API Base URL").setDesc(this.plugin.settings.apiBaseUrl || "Not configured");
+    new Setting(container).setName("Default model").setDesc(this.plugin.settings.defaultModel || "Not configured");
+    new Setting(container).setName("Transcription language").setDesc(formatTranscriptionLanguageLabel(this.plugin.getTranscriptionLanguage()));
+    new Setting(container).setName("Output language").setDesc(formatOutputLanguageLabel(this.plugin.getOutputLanguage()));
+
+    container.createEl("h3", { text: "Workflows" });
+    this.addActionButton(container, "Start meeting recording", async () => this.plugin.startMeetingRecording());
+    this.addActionButton(container, "Stop recording and generate minutes", async () => this.plugin.stopRecordingAndGenerateMeetingMinutes());
+    this.addActionButton(container, "Summarize current note", async () => this.plugin.summarizeCurrentNote());
+    this.addActionButton(container, "Generate minutes from audio file", async () => this.plugin.generateMeetingMinutesFromAudioFile());
+
+    container.createEl("h3", { text: "Folders" });
+    this.addActionButton(container, "Open meetings", async () => this.plugin.openConfiguredFolder(this.plugin.getMeetingsFolder()));
+    this.addActionButton(container, "Open recordings", async () => this.plugin.openConfiguredFolder(this.plugin.getRecordingsFolder()));
+    this.addActionButton(container, "Open summaries", async () => this.plugin.openConfiguredFolder(this.plugin.getOutputFolder()));
+    this.addActionButton(container, "Open templates", async () => this.plugin.openConfiguredFolder(this.plugin.getTemplatesFolder()));
+  }
+
+  private addActionButton(container: HTMLElement, label: string, action: () => Promise<void>): void {
+    new Setting(container).setName(label).addButton((button) =>
+      button.setButtonText(label).onClick(async () => {
+        try {
+          await action();
+        } catch (error) {
+          this.plugin.showUserFacingError(error);
+        } finally {
+          this.render();
+        }
+      }),
+    );
+  }
+}
+
 class LocalAiPlatformSettingTab extends PluginSettingTab {
   plugin: LocalAiPlatformPlugin;
 
@@ -929,7 +1095,7 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "AI Meeting Assistant" });
+    containerEl.createEl("h2", { text: "Notre Compagnon" });
 
     new Setting(containerEl)
       .setName("API Base URL")
@@ -989,13 +1155,43 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Templates folder")
-      .setDesc(`Vault folder containing ${DEFAULT_TEMPLATE_FILE}. Falls back to the built-in template if the file is missing.`)
+      .setDesc(`Vault folder containing Markdown templates such as ${DEFAULT_TEMPLATE_FILE}. Falls back to the built-in template if the folder is empty.`)
       .addText((text) =>
         text
-          .setPlaceholder("Templates")
+          .setPlaceholder(DEFAULT_TEMPLATES_FOLDER)
           .setValue(this.plugin.settings.templatesFolder)
           .onChange(async (value) => {
-            this.plugin.settings.templatesFolder = value.trim();
+            this.plugin.settings.templatesFolder = value.trim() || DEFAULT_TEMPLATES_FOLDER;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Transcription language")
+      .setDesc("Language hint for the meeting workflow. Current gateway transcription is configured server-side; this setting documents the intended meeting language.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("auto", "Auto")
+          .addOption("fr", "French")
+          .addOption("en", "English")
+          .setValue(this.plugin.settings.transcriptionLanguage)
+          .onChange(async (value) => {
+            this.plugin.settings.transcriptionLanguage = value as PluginSettings["transcriptionLanguage"];
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Output language")
+      .setDesc("Adds a language instruction to the template sent to the gateway.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("same_as_meeting", "Same as meeting")
+          .addOption("fr", "French")
+          .addOption("en", "English")
+          .setValue(this.plugin.settings.outputLanguage)
+          .onChange(async (value) => {
+            this.plugin.settings.outputLanguage = value as PluginSettings["outputLanguage"];
             await this.plugin.saveSettings();
           }),
       );
@@ -1059,11 +1255,13 @@ class TemplatePickerModal extends Modal {
 
     for (const choice of this.choices) {
       const setting = new Setting(contentEl).setName(choice.label);
-      if (choice.sourcePath) {
-        setting.setDesc(choice.sourcePath);
-      } else {
-        setting.setDesc("Uses the built-in fallback template.");
-      }
+      const details = [
+        choice.description,
+        choice.language ? `Language: ${choice.language}` : null,
+        choice.type ? `Type: ${choice.type}` : null,
+        choice.sourcePath ?? "Uses the built-in fallback template.",
+      ].filter((item): item is string => item !== null && item.trim().length > 0);
+      setting.setDesc(details.join(" | "));
       setting.addButton((button) =>
         button.setButtonText("Use template").setCta().onClick(() => {
           this.onChoose(choice);
@@ -1112,7 +1310,7 @@ class MeetingMetadataModal extends Modal {
     });
 
     new Setting(contentEl).addButton((button) =>
-      button.setButtonText("Generate meeting minutes").setCta().onClick(() => {
+      button.setButtonText("Generate minutes").setCta().onClick(() => {
         const trimmedTitle = this.titleValue.trim();
         if (!trimmedTitle) {
           new Notice("Meeting title is required.", 5000);
@@ -1313,19 +1511,116 @@ function sanitizeFileName(input: string): string {
   return input.replace(/[\\/:*?"<>|]/g, "-").trim() || "Untitled";
 }
 
+function parseTemplateContent(content: string): {
+  metadata: { name: string | null; language: string | null; type: string | null; description: string | null };
+  body: string;
+} {
+  const normalized = content.replace(/^\uFEFF/, "");
+  if (!normalized.startsWith("---\n")) {
+    return {
+      metadata: { name: null, language: null, type: null, description: null },
+      body: normalized,
+    };
+  }
+
+  const closingIndex = normalized.indexOf("\n---", 4);
+  if (closingIndex < 0) {
+    return {
+      metadata: { name: null, language: null, type: null, description: null },
+      body: normalized,
+    };
+  }
+
+  const frontmatter = normalized.slice(4, closingIndex);
+  const body = normalized.slice(closingIndex + 4).replace(/^\r?\n/, "");
+  const metadata = { name: null, language: null, type: null, description: null } as {
+    name: string | null;
+    language: string | null;
+    type: string | null;
+    description: string | null;
+  };
+
+  for (const line of frontmatter.split(/\r?\n/)) {
+    const separatorIndex = line.indexOf(":");
+    if (separatorIndex < 0) {
+      continue;
+    }
+    const key = line.slice(0, separatorIndex).trim();
+    const value = line.slice(separatorIndex + 1).trim().replace(/^["']|["']$/g, "");
+    if (key === "name" || key === "language" || key === "type" || key === "description") {
+      metadata[key] = value || null;
+    }
+  }
+
+  return { metadata, body };
+}
+
+function buildLanguageInstruction(outputLanguage: PluginSettings["outputLanguage"]): string {
+  if (outputLanguage === "fr") {
+    return [
+      "## Consigne de langue",
+      "Repondre en francais.",
+      "Conserver les noms propres, noms de produits et acronymes sans traduction abusive.",
+    ].join("\n");
+  }
+  if (outputLanguage === "en") {
+    return [
+      "## Language instruction",
+      "Answer in English.",
+      "Keep proper nouns, product names, and acronyms unchanged unless a standard translation is obvious.",
+    ].join("\n");
+  }
+  return [
+    "## Language instruction",
+    "Detect the main meeting language and answer in that language.",
+    "If the source is bilingual, preserve proper nouns and acronyms without abusive translation.",
+  ].join("\n");
+}
+
+function buildTranscriptionLanguageHint(transcriptionLanguage: PluginSettings["transcriptionLanguage"]): string {
+  if (transcriptionLanguage === "fr") {
+    return "## Transcription language hint\nThe meeting transcription is expected to be mainly in French.";
+  }
+  if (transcriptionLanguage === "en") {
+    return "## Transcription language hint\nThe meeting transcription is expected to be mainly in English.";
+  }
+  return "## Transcription language hint\nDetect the transcription language from the provided meeting material.";
+}
+
+function formatOutputLanguageLabel(outputLanguage: string): string {
+  if (outputLanguage === "fr") return "French";
+  if (outputLanguage === "en") return "English";
+  return "Same as meeting";
+}
+
+function formatTranscriptionLanguageLabel(transcriptionLanguage: string): string {
+  if (transcriptionLanguage === "fr") return "French";
+  if (transcriptionLanguage === "en") return "English";
+  return "Auto";
+}
+
+function formatJobStatusNotice(status: JobStatusResponsePayload["status"]): string {
+  if (status === "queued") return "Transcription queued.";
+  if (status === "processing") return "Transcription processing.";
+  if (status === "completed") return "Transcription completed.";
+  return "Transcription failed.";
+}
+
 function buildSummaryNote(input: {
   title: string;
   generatedAt: Date;
   model: string;
   sourceLink: string;
   templateLabel: string;
+  outputLanguage: string;
   summaryMarkdown: string;
 }): string {
-  return `# AI Summary - ${input.title}
+  return `# Notre Compagnon - Summary - ${input.title}
 
 - Generated at: ${formatIsoTimestamp(input.generatedAt)}
 - Model: ${input.model}
 - Template: ${input.templateLabel}
+- Output language: ${formatOutputLanguageLabel(input.outputLanguage)}
 - Source note: [[${input.sourceLink}]]
 
 ${input.summaryMarkdown}
@@ -1372,6 +1667,7 @@ function buildMeetingNote(input: {
   generatedAt: Date;
   model: string;
   templateLabel: string;
+  outputLanguage: string;
   jobId: string;
   audioFileName: string;
   sourceMeetingLink: string | null;
@@ -1382,12 +1678,13 @@ function buildMeetingNote(input: {
     `- Generated at: ${formatIsoTimestamp(input.generatedAt)}`,
     `- Model: ${input.model}`,
     `- Template: ${input.templateLabel}`,
+    `- Output language: ${formatOutputLanguageLabel(input.outputLanguage)}`,
     `- Job ID: ${input.jobId}`,
     input.sourceMeetingLink ? `- Source meeting note: [[${input.sourceMeetingLink}]]` : null,
     input.sourceAudioLink ? `- Source audio file: [[${input.sourceAudioLink}]]` : `- Source audio file: ${input.audioFileName}`,
   ].filter((line): line is string => line !== null);
 
-  return `# Meeting Minutes - ${input.title}
+  return `# Notre Compagnon - Meeting Minutes - ${input.title}
 
 ${metadataLines.join("\n")}
 

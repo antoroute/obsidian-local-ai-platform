@@ -49,7 +49,7 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - Model usage is constrained by an `ALLOWED_MODELS` allowlist
 - The gateway applies note and template size limits before calling Ollama
 - The gateway must not expose Ollama endpoints for `pull`, `delete`, `create`, or `show`
-- `LLM_PROVIDER=fake` is a development-only runtime mode and must not be used for production AI behavior
+- `LLM_PROVIDER=fake` is only for development UX checks or CI and must not be used as the primary runtime path
 
 ## Current summarization safeguards
 
@@ -101,7 +101,7 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - Use strong secrets in real `.env` files
 - Keep `.env` out of version control
 - Limit server access to administrators
-- Publish only the reverse proxy service publicly
+- In the production-like Docker mode, publish only `ai-gateway` on `127.0.0.1:8000` for the external reverse proxy
 - Verify that `5432`, `6379`, and `11434` are not published on the host
 - Keep GPU inference containers on an internal Docker network
 - Do not log `Authorization` headers or full bearer tokens

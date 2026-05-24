@@ -1,0 +1,8 @@
+services:
+  whisper-worker:
+    networks:
+      - whisper_model_setup_access
+
+networks:
+  whisper_model_setup_access:
+    driver: bridge

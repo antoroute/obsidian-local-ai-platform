@@ -1,0 +1,18 @@
+services:
+  reverse-proxy:
+    profiles:
+      - container-proxy
+    ports: []
+
+  ai-gateway:
+    environment:
+      LLM_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      DEFAULT_MODEL: mistral:latest
+      ALLOWED_MODELS: mistral:latest,qwen2.5:14b,llama3:latest
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  whisper-worker:
+    environment:
+      TRANSCRIPTION_ENGINE: faster_whisper

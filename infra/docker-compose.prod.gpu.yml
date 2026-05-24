@@ -1,0 +1,22 @@
+services:
+  ollama:
+    gpus:
+      - driver: nvidia
+        count: all
+
+  whisper-worker:
+    build:
+      context: ./apps/whisper-worker
+      dockerfile: Dockerfile.gpu
+    environment:
+      TRANSCRIPTION_ENGINE: faster_whisper
+      WHISPER_MODEL_SIZE: medium
+      WHISPER_DEVICE: cuda
+      WHISPER_COMPUTE_TYPE: float16
+      WHISPER_LANGUAGE: fr
+      WHISPER_MODEL_CACHE_DIR: /models/whisper
+      HF_HOME: /models/whisper
+      HUGGINGFACE_HUB_CACHE: /models/whisper/hub
+    gpus:
+      - driver: nvidia
+        count: all
