@@ -1,18 +1,15 @@
 ---
-name: Actions seulement
+name: Actions uniquement
 language: fr
-type: actions
-description: Sortie concise centree sur les actions et responsables.
+type: meeting_summary
+description: Extrait uniquement les actions, responsables et echeances.
 ---
 # Actions a suivre
 
-## Synthese courte
+Extraire uniquement les actions confirmees par les sources.
+Ne pas inventer de responsable ou d'echeance.
 
 ## Actions
 
-| Priorite | Action | Responsable | Echeance | Source |
-| --- | --- | --- | --- | --- |
-
-## Decisions liees
-
-## Points a clarifier
+| Action | Responsable | Echeance | Source / incertitude |
+| --- | --- | --- | --- |

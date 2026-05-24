@@ -1,18 +1,15 @@
 ---
 name: Actions only
 language: en
-type: actions
-description: Concise output focused on action items and owners.
+type: meeting_summary
+description: Extracts only actions, owners, and due dates.
 ---
 # Follow-up actions
 
-## Short summary
+Extract only actions confirmed by the sources.
+Do not invent owners or due dates.
 
 ## Actions
 
-| Priority | Action | Owner | Due date | Source |
-| --- | --- | --- | --- | --- |
-
-## Related decisions
-
-## Points to clarify
+| Action | Owner | Due date | Source / uncertainty |
+| --- | --- | --- | --- |
