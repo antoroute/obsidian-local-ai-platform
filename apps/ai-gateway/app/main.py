@@ -12,6 +12,7 @@ from app.auth import get_current_token, require_scope
 from app.config import get_settings
 from app.database import init_db
 from app.models import ApiToken
+from app.token_repository import token_has_scope
 from app.jobs import (
     JOB_STATUS_COMPLETED,
     create_audio_transcription_job,
@@ -44,10 +45,32 @@ from app.schemas import (
     NoteSummarizeResponse,
     TranscriptResponse,
     UsageResponse,
+    VaultAskRequest,
+    VaultAskResponse,
+    VaultDeleteResponse,
+    VaultIndexNoteRequest,
+    VaultIndexNoteResponse,
+    VaultSearchRequest,
+    VaultSearchResponse,
+    VaultSearchResult,
+    VaultSourceResponse,
+    VaultStatsResponse,
 )
 from app.services.llm_client import FakeLlmClient, LlmClient, OllamaLlmClient
+from app.services.embedding_client import OllamaEmbeddingClient
 from app.services.ollama_client import OllamaClient, OllamaResponseError, OllamaUnavailableError
 from app.database import get_db_session
+from app.models import VaultChunk, VaultDocument
+from app.vault_rag import (
+    build_insufficient_sources_answer,
+    build_vault_answer_prompt,
+    ensure_rag_enabled,
+    index_note,
+    make_snippet,
+    search_vault,
+    validate_vault_model,
+)
+from sqlalchemy import delete, func, select
 
 settings = get_settings()
 
@@ -84,6 +107,15 @@ def get_llm_client() -> LlmClient:
     if current_settings.llm_provider == "ollama":
         return OllamaLlmClient(get_ollama_client())
     raise RuntimeError(f"Unsupported LLM_PROVIDER: {current_settings.llm_provider}")
+
+
+def get_embedding_client() -> OllamaEmbeddingClient:
+    current_settings = get_settings()
+    return OllamaEmbeddingClient(
+        base_url=current_settings.ollama_base_url,
+        timeout_seconds=current_settings.ollama_timeout_seconds,
+        model=current_settings.rag_embedding_model,
+    )
 
 
 @app.get("/v1/health", tags=["system"], response_model=HealthResponse)
@@ -280,6 +312,176 @@ async def generate_meeting_report_from_job(
             participants_count=prepared_request.participants_count,
         ),
     )
+
+
+@app.post("/v1/vault/index-note", tags=["vault"], response_model=VaultIndexNoteResponse)
+async def vault_index_note(
+    payload: VaultIndexNoteRequest,
+    token: Annotated[ApiToken, Depends(require_scope("vault:index"))],
+    session: Annotated[Session, Depends(get_db_session)],
+    embedding_client: Annotated[OllamaEmbeddingClient, Depends(get_embedding_client)],
+) -> VaultIndexNoteResponse:
+    settings = get_settings()
+    try:
+        status_value, document, chunks_indexed, content_hash = await index_note(
+            session,
+            user_id=token.user_id,
+            payload=payload,
+            settings=settings,
+            embed_text=lambda text: _embed_text(embedding_client, text),
+        )
+    except OllamaUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="The embedding backend is currently unavailable.") from exc
+    except OllamaResponseError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="The embedding backend returned an invalid response.") from exc
+
+    return VaultIndexNoteResponse(
+        status=status_value,
+        document_id=document.id,
+        path=document.path,
+        chunks_indexed=chunks_indexed,
+        content_hash=content_hash,
+    )
+
+
+@app.post("/v1/vault/search", tags=["vault"], response_model=VaultSearchResponse)
+async def vault_search(
+    payload: VaultSearchRequest,
+    token: Annotated[ApiToken, Depends(require_scope("vault:search"))],
+    session: Annotated[Session, Depends(get_db_session)],
+    embedding_client: Annotated[OllamaEmbeddingClient, Depends(get_embedding_client)],
+) -> VaultSearchResponse:
+    settings = get_settings()
+    try:
+        hits = await search_vault(
+            session,
+            user_id=token.user_id,
+            payload=payload,
+            settings=settings,
+            embed_text=lambda text: _embed_text(embedding_client, text),
+        )
+    except OllamaUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="The embedding backend is currently unavailable.") from exc
+    except OllamaResponseError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="The embedding backend returned an invalid response.") from exc
+
+    return VaultSearchResponse(
+        query=payload.query,
+        results=[
+            VaultSearchResult(
+                path=hit.document.path,
+                title=hit.document.title,
+                heading_path=hit.chunk.heading_path,
+                snippet=make_snippet(hit.chunk.content),
+                score=round(hit.score, 6),
+                chunk_index=hit.chunk.chunk_index,
+            )
+            for hit in hits
+        ],
+    )
+
+
+@app.post("/v1/vault/ask", tags=["vault"], response_model=VaultAskResponse)
+async def vault_ask(
+    payload: VaultAskRequest,
+    token: Annotated[ApiToken, Depends(require_scope("vault:ask"))],
+    session: Annotated[Session, Depends(get_db_session)],
+    embedding_client: Annotated[OllamaEmbeddingClient, Depends(get_embedding_client)],
+    llm_client: Annotated[LlmClient, Depends(get_llm_client)],
+) -> VaultAskResponse:
+    settings = get_settings()
+    ensure_rag_enabled(settings)
+    selected_model = validate_vault_model(payload.model or settings.default_model, settings)
+    try:
+        hits = await search_vault(
+            session,
+            user_id=token.user_id,
+            payload=VaultSearchRequest(
+                vault_id=payload.vault_id,
+                query=payload.question,
+                top_k=payload.top_k,
+                path_prefix=payload.path_prefix,
+                tags=payload.tags,
+            ),
+            settings=settings,
+            embed_text=lambda text: _embed_text(embedding_client, text),
+        )
+    except OllamaUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="The embedding backend is currently unavailable.") from exc
+    except OllamaResponseError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="The embedding backend returned an invalid response.") from exc
+
+    sources = [
+        VaultSourceResponse(
+            path=hit.document.path,
+            title=hit.document.title,
+            heading_path=hit.chunk.heading_path,
+            chunk_index=hit.chunk.chunk_index,
+            score=round(hit.score, 6),
+        )
+        for hit in hits
+    ]
+    if not hits:
+        return VaultAskResponse(model=selected_model, answer_markdown=build_insufficient_sources_answer(hits), sources=sources)
+
+    system_prompt, user_prompt = build_vault_answer_prompt(
+        question=payload.question,
+        hits=hits,
+        settings=settings,
+        answer_language=payload.answer_language,
+    )
+    try:
+        result = await llm_client.vault_ask(
+            model=selected_model,
+            question_chars=len(payload.question),
+            context_chars=len(user_prompt),
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+    except OllamaUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="The vault answer backend is currently unavailable.") from exc
+    except OllamaResponseError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="The vault answer backend returned an invalid response.") from exc
+
+    return VaultAskResponse(model=result.model, answer_markdown=result.content, sources=sources)
+
+
+@app.get("/v1/vault/stats", tags=["vault"], response_model=VaultStatsResponse)
+def vault_stats(
+    token: Annotated[ApiToken, Depends(get_current_token)],
+    session: Annotated[Session, Depends(get_db_session)],
+    vault_id: str | None = None,
+) -> VaultStatsResponse:
+    settings = get_settings()
+    ensure_rag_enabled(settings)
+    if not (token_has_scope(token, "vault:search") or token_has_scope(token, "vault:admin")):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing required scope: vault:search or vault:admin")
+    selected_vault_id = vault_id or settings.rag_default_vault_id
+    documents = int(session.scalar(select(func.count()).select_from(VaultDocument).where(VaultDocument.user_id == token.user_id, VaultDocument.vault_id == selected_vault_id, VaultDocument.deleted_at.is_(None))) or 0)
+    chunks = int(session.scalar(select(func.count()).select_from(VaultChunk).where(VaultChunk.user_id == token.user_id, VaultChunk.vault_id == selected_vault_id)) or 0)
+    last_indexed = session.scalar(select(func.max(VaultDocument.indexed_at)).where(VaultDocument.user_id == token.user_id, VaultDocument.vault_id == selected_vault_id))
+    return VaultStatsResponse(vault_id=selected_vault_id, documents=documents, chunks=chunks, last_indexed_at=last_indexed.isoformat() if last_indexed else None)
+
+
+@app.delete("/v1/vault/index", tags=["vault"], response_model=VaultDeleteResponse)
+def vault_delete_index(
+    token: Annotated[ApiToken, Depends(require_scope("vault:admin"))],
+    session: Annotated[Session, Depends(get_db_session)],
+    vault_id: str | None = None,
+) -> VaultDeleteResponse:
+    settings = get_settings()
+    ensure_rag_enabled(settings)
+    selected_vault_id = vault_id or settings.rag_default_vault_id
+    chunks = int(session.scalar(select(func.count()).select_from(VaultChunk).where(VaultChunk.user_id == token.user_id, VaultChunk.vault_id == selected_vault_id)) or 0)
+    documents = int(session.scalar(select(func.count()).select_from(VaultDocument).where(VaultDocument.user_id == token.user_id, VaultDocument.vault_id == selected_vault_id)) or 0)
+    session.execute(delete(VaultDocument).where(VaultDocument.user_id == token.user_id, VaultDocument.vault_id == selected_vault_id))
+    session.commit()
+    return VaultDeleteResponse(vault_id=selected_vault_id, deleted_documents=documents, deleted_chunks=chunks)
+
+
+async def _embed_text(embedding_client: OllamaEmbeddingClient, text: str) -> list[float]:
+    result = await embedding_client.embed_text(text)
+    return result.embedding
 
 
 @app.post("/v1/audio/transcribe", tags=["audio"], response_model=AudioTranscriptionQueuedResponse)

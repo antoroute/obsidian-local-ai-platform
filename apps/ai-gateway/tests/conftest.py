@@ -52,6 +52,10 @@ def client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("CORS_ALLOW_METHODS", "GET,POST,OPTIONS")
     monkeypatch.setenv("CORS_ALLOW_HEADERS", "Authorization,Content-Type")
     monkeypatch.setenv("CORS_ALLOW_CREDENTIALS", "false")
+    monkeypatch.setenv("RAG_ENABLED", "true")
+    monkeypatch.setenv("RAG_VECTOR_BACKEND", "sqlite")
+    monkeypatch.setenv("RAG_EMBEDDING_DIMENSION", "3")
+    monkeypatch.setenv("RAG_MIN_SCORE", "0.25")
 
     get_settings.cache_clear()
     get_engine.cache_clear()

@@ -51,6 +51,19 @@ services:
       AUDIO_STORAGE_DIR: ${AUDIO_STORAGE_DIR:-/data/audio}
       MAX_AUDIO_UPLOAD_MB: ${MAX_AUDIO_UPLOAD_MB:-500}
       AUDIO_QUEUE_NAME: ${AUDIO_QUEUE_NAME:-audio_transcription_jobs}
+      RAG_ENABLED: ${RAG_ENABLED:-true}
+      RAG_VECTOR_BACKEND: ${RAG_VECTOR_BACKEND:-pgvector}
+      RAG_EMBEDDING_PROVIDER: ${RAG_EMBEDDING_PROVIDER:-ollama}
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-nomic-embed-text:latest}
+      RAG_EMBEDDING_DIMENSION: ${RAG_EMBEDDING_DIMENSION:-768}
+      RAG_CHUNK_SIZE: ${RAG_CHUNK_SIZE:-900}
+      RAG_CHUNK_OVERLAP: ${RAG_CHUNK_OVERLAP:-150}
+      RAG_MAX_CHUNKS_PER_QUERY: ${RAG_MAX_CHUNKS_PER_QUERY:-8}
+      RAG_MAX_CONTEXT_CHARS: ${RAG_MAX_CONTEXT_CHARS:-24000}
+      RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.25}
+      RAG_INDEX_EXCLUDED_DIRS: ${RAG_INDEX_EXCLUDED_DIRS:-.obsidian,Templates,Archives,Private}
+      RAG_INDEX_EXCLUDED_TAGS: ${RAG_INDEX_EXCLUDED_TAGS:-noai,private}
+      RAG_DEFAULT_VAULT_ID: ${RAG_DEFAULT_VAULT_ID:-default}
     depends_on:
       postgres:
         condition: service_healthy
@@ -131,7 +144,7 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-obsidian_ai}
       POSTGRES_USER: ${POSTGRES_USER:-app}

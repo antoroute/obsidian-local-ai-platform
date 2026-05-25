@@ -8,6 +8,7 @@ TranscriptionLanguage = Literal["auto", "fr", "en"]
 AssistantMode = Literal["chat", "correct", "rewrite", "summarize"]
 AssistantOutputLanguage = Literal["same_as_input", "fr", "en"]
 AssistantResponseStyle = Literal["direct", "detailed"]
+VaultAnswerLanguage = Literal["same_as_input", "fr", "en"]
 
 
 class HealthResponse(BaseModel):
@@ -129,3 +130,81 @@ class AssistantChatResponse(BaseModel):
     mode: AssistantMode
     answer_markdown: str
     usage: AssistantUsageResponse
+
+
+class VaultIndexNoteRequest(BaseModel):
+    vault_id: str = Field(default="default", min_length=1)
+    path: str = Field(min_length=1)
+    title: str | None = None
+    content: str = Field(min_length=1)
+    modified_at: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    frontmatter: dict[str, object] = Field(default_factory=dict)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class VaultIndexNoteResponse(BaseModel):
+    status: Literal["indexed", "skipped"]
+    document_id: str
+    path: str
+    chunks_indexed: int
+    content_hash: str
+
+
+class VaultSearchRequest(BaseModel):
+    vault_id: str = Field(default="default", min_length=1)
+    query: str = Field(min_length=1)
+    top_k: int | None = None
+    path_prefix: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class VaultSearchResult(BaseModel):
+    path: str
+    title: str | None
+    heading_path: str | None
+    snippet: str
+    score: float
+    chunk_index: int
+
+
+class VaultSearchResponse(BaseModel):
+    query: str
+    results: list[VaultSearchResult]
+
+
+class VaultAskRequest(BaseModel):
+    vault_id: str = Field(default="default", min_length=1)
+    question: str = Field(min_length=1)
+    model: str | None = None
+    top_k: int | None = None
+    path_prefix: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    answer_language: VaultAnswerLanguage = "same_as_input"
+
+
+class VaultSourceResponse(BaseModel):
+    path: str
+    title: str | None
+    heading_path: str | None
+    chunk_index: int
+    score: float
+
+
+class VaultAskResponse(BaseModel):
+    model: str
+    answer_markdown: str
+    sources: list[VaultSourceResponse]
+
+
+class VaultStatsResponse(BaseModel):
+    vault_id: str
+    documents: int
+    chunks: int
+    last_indexed_at: str | None
+
+
+class VaultDeleteResponse(BaseModel):
+    vault_id: str
+    deleted_documents: int
+    deleted_chunks: int

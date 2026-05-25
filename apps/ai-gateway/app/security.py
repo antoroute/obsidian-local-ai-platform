@@ -14,6 +14,10 @@ AVAILABLE_SCOPES = {
     "meetings:generate",
     "audio:transcribe",
     "assistant:chat",
+    "vault:index",
+    "vault:search",
+    "vault:ask",
+    "vault:admin",
     "admin",
 }
 

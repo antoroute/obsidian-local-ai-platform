@@ -33,6 +33,19 @@ class Settings(BaseSettings):
     cors_allow_methods_raw: str = Field(default="GET,POST,OPTIONS", alias="CORS_ALLOW_METHODS")
     cors_allow_headers_raw: str = Field(default="Authorization,Content-Type", alias="CORS_ALLOW_HEADERS")
     cors_allow_credentials: bool = Field(default=False, alias="CORS_ALLOW_CREDENTIALS")
+    rag_enabled: bool = Field(default=True, alias="RAG_ENABLED")
+    rag_vector_backend: str = Field(default="pgvector", alias="RAG_VECTOR_BACKEND")
+    rag_embedding_provider: str = Field(default="ollama", alias="RAG_EMBEDDING_PROVIDER")
+    rag_embedding_model: str = Field(default="nomic-embed-text", alias="RAG_EMBEDDING_MODEL")
+    rag_embedding_dimension: int = Field(default=768, alias="RAG_EMBEDDING_DIMENSION")
+    rag_chunk_size: int = Field(default=900, alias="RAG_CHUNK_SIZE")
+    rag_chunk_overlap: int = Field(default=150, alias="RAG_CHUNK_OVERLAP")
+    rag_max_chunks_per_query: int = Field(default=8, alias="RAG_MAX_CHUNKS_PER_QUERY")
+    rag_max_context_chars: int = Field(default=24000, alias="RAG_MAX_CONTEXT_CHARS")
+    rag_min_score: float = Field(default=0.25, alias="RAG_MIN_SCORE")
+    rag_index_excluded_dirs_raw: str = Field(default=".obsidian,Templates,Archives,Private", alias="RAG_INDEX_EXCLUDED_DIRS")
+    rag_index_excluded_tags_raw: str = Field(default="noai,private", alias="RAG_INDEX_EXCLUDED_TAGS")
+    rag_default_vault_id: str = Field(default="default", alias="RAG_DEFAULT_VAULT_ID")
 
     @property
     def allowed_models(self) -> list[str]:
@@ -49,6 +62,14 @@ class Settings(BaseSettings):
     @property
     def cors_allow_headers(self) -> list[str]:
         return [header.strip() for header in self.cors_allow_headers_raw.split(",") if header.strip()]
+
+    @property
+    def rag_index_excluded_dirs(self) -> list[str]:
+        return [item.strip() for item in self.rag_index_excluded_dirs_raw.split(",") if item.strip()]
+
+    @property
+    def rag_index_excluded_tags(self) -> list[str]:
+        return [item.strip() for item in self.rag_index_excluded_tags_raw.split(",") if item.strip()]
 
 
 @lru_cache

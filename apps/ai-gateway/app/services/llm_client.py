@@ -42,6 +42,16 @@ class LlmClient(Protocol):
         user_prompt: str,
     ) -> OllamaChatResult: ...
 
+    async def vault_ask(
+        self,
+        *,
+        model: str,
+        question_chars: int,
+        context_chars: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult: ...
+
 
 @dataclass(frozen=True)
 class FakeLlmClient:
@@ -125,6 +135,26 @@ class FakeLlmClient:
         )
         return OllamaChatResult(model=model, content=content)
 
+    async def vault_ask(
+        self,
+        *,
+        model: str,
+        question_chars: int,
+        context_chars: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult:
+        del system_prompt, user_prompt
+        content = (
+            "# Reponse RAG fake\n"
+            "Ceci est une reponse fake deterministe pour valider le RAG.\n\n"
+            "## Informations recues\n"
+            f"- Modele demande : {model}\n"
+            f"- Longueur question : {question_chars} caracteres\n"
+            f"- Longueur contexte : {context_chars} caracteres\n"
+        )
+        return OllamaChatResult(model=model, content=content)
+
 
 @dataclass(frozen=True)
 class OllamaLlmClient:
@@ -177,6 +207,22 @@ class OllamaLlmClient:
         user_prompt: str,
     ) -> OllamaChatResult:
         del mode, message_chars, context_chars
+        return await self.ollama_client.summarize_markdown(
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+
+    async def vault_ask(
+        self,
+        *,
+        model: str,
+        question_chars: int,
+        context_chars: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult:
+        del question_chars, context_chars
         return await self.ollama_client.summarize_markdown(
             model=model,
             system_prompt=system_prompt,

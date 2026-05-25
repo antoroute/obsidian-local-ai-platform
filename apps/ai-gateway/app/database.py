@@ -33,13 +33,17 @@ def get_db_session() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    from app.models import ApiToken, Job
+    from app.models import ApiToken, Job, VaultChunk, VaultDocument
 
     del ApiToken
     del Job
+    del VaultChunk
+    del VaultDocument
     engine = get_engine()
+    ensure_pgvector_extension(engine)
     Base.metadata.create_all(bind=engine)
     ensure_job_metadata_column(engine)
+    ensure_pgvector_support(engine)
 
 
 def ensure_job_metadata_column(engine: Engine) -> None:
@@ -51,3 +55,34 @@ def ensure_job_metadata_column(engine: Engine) -> None:
         return
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE jobs ADD COLUMN metadata_json TEXT"))
+
+
+def ensure_pgvector_extension(engine: Engine) -> None:
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.begin() as connection:
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+
+
+def ensure_pgvector_support(engine: Engine) -> None:
+    if engine.dialect.name != "postgresql":
+        return
+    settings = get_settings()
+    with engine.begin() as connection:
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        connection.execute(text(f"ALTER TABLE vault_chunks ADD COLUMN IF NOT EXISTS embedding vector({settings.rag_embedding_dimension})"))
+        connection.execute(text(f"ALTER TABLE vault_chunks ALTER COLUMN embedding TYPE vector({settings.rag_embedding_dimension})"))
+        connection.execute(text("DELETE FROM vault_chunks WHERE embedding IS NULL"))
+        connection.execute(text("ALTER TABLE vault_chunks ALTER COLUMN embedding SET NOT NULL"))
+        connection.execute(text("ALTER TABLE vault_chunks DROP COLUMN IF EXISTS embedding_json"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_documents_user_vault ON vault_documents (user_id, vault_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_chunks_user_vault ON vault_chunks (user_id, vault_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_chunks_document ON vault_chunks (document_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_documents_user_vault_path ON vault_documents (user_id, vault_id, path)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_chunks_path ON vault_chunks (path)"))
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE INDEX IF NOT EXISTS idx_vault_chunks_embedding_hnsw ON vault_chunks USING hnsw (embedding vector_cosine_ops)"))
+    except Exception:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE INDEX IF NOT EXISTS idx_vault_chunks_embedding_ivfflat ON vault_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)"))

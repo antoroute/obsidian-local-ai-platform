@@ -162,6 +162,119 @@ Error behavior:
 - `503 Service Unavailable` when Ollama cannot be reached
 - `502 Bad Gateway` when Ollama returns an invalid upstream response
 
+## Vault RAG
+
+Vault RAG is explicit and separate from `POST /v1/assistant/chat`. The gateway never reads CouchDB or LiveSync directly. The future Obsidian plugin integration will send decrypted note content to these endpoints from the local vault.
+
+### `POST /v1/vault/index-note`
+
+Required scope: `vault:index`
+
+```json
+{
+  "vault_id": "default",
+  "path": "Projects/Note Compagnon.md",
+  "title": "Note Compagnon",
+  "content": "...markdown...",
+  "modified_at": "2026-05-25T12:00:00Z",
+  "tags": ["project", "ai"],
+  "frontmatter": {},
+  "metadata": {}
+}
+```
+
+Returns `indexed` with `chunks_indexed`, or `skipped` when the content hash is unchanged or the note is excluded.
+
+```bash
+curl -X POST "$API_BASE_URL/v1/vault/index-note" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"vault_id":"default","path":"Projects/RAG.md","title":"RAG","content":"# RAG\n\nDecision CouchDB...","tags":["infra"]}'
+```
+
+### `POST /v1/vault/search`
+
+Required scope: `vault:search`
+
+```json
+{
+  "vault_id": "default",
+  "query": "ce que j'ai decide pour CouchDB",
+  "top_k": 8,
+  "path_prefix": "Projects/",
+  "tags": ["infra"]
+}
+```
+
+Uses PostgreSQL + pgvector in production. Scores are derived from cosine distance (`score = 1 - distance`) using pgvector's `<=>` operator. Returns bounded snippets only, never full notes.
+
+```bash
+curl -X POST "$API_BASE_URL/v1/vault/search" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"vault_id":"default","query":"decision CouchDB","top_k":8}'
+```
+
+### `POST /v1/vault/ask`
+
+Required scope: `vault:ask`
+
+```json
+{
+  "vault_id": "default",
+  "question": "Quelle solution avais-je retenue pour CouchDB ?",
+  "model": "mistral:latest",
+  "top_k": 8,
+  "path_prefix": null,
+  "tags": [],
+  "answer_language": "same_as_input"
+}
+```
+
+The gateway searches indexed chunks through the same pgvector search layer as `/v1/vault/search`, builds a bounded context, calls the allowlisted LLM, and returns:
+
+```json
+{
+  "model": "mistral:latest",
+  "answer_markdown": "## Reponse\n\n...\n\n## Sources utilisees\n\n- [[Projects/Note Compagnon.md]]",
+  "sources": [
+    {
+      "path": "Projects/Note Compagnon.md",
+      "title": "Note Compagnon",
+      "heading_path": "Architecture > RAG",
+      "chunk_index": 2,
+      "score": 0.82
+    }
+  ]
+}
+```
+
+If no source is relevant enough, the answer says that the available notes are insufficient. The endpoint must not claim to have read the whole vault.
+
+```bash
+curl -X POST "$API_BASE_URL/v1/vault/ask" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"vault_id":"default","question":"Quelle solution avais-je retenue pour CouchDB ?","model":"mistral:latest","answer_language":"same_as_input"}'
+```
+
+### `GET /v1/vault/stats`
+
+Required scope: `vault:search` or `vault:admin`
+
+### `DELETE /v1/vault/index`
+
+Required scope: `vault:admin`
+
+Deletes only the authenticated user's index for the selected `vault_id`.
+
+RAG error behavior:
+
+- `401 Unauthorized` when the bearer token is missing or invalid
+- `403 Forbidden` when the required vault scope is missing or the LLM model is outside `ALLOWED_MODELS`
+- `503 Service Unavailable` when `RAG_ENABLED=false` or embeddings are unavailable
+- `502 Bad Gateway` when the embedding or LLM backend returns an invalid response
+
 ## Planned endpoints
 
 ## Future realtime endpoint

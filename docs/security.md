@@ -39,6 +39,7 @@ Each API token stores only:
 - revoked status
 
 The raw token is shown only once by the CLI at creation time and must not be logged or persisted elsewhere.
+Production scripts may invoke the token CLI, but they must not write the raw token to a file.
 
 ## Ollama control rules
 
@@ -46,6 +47,10 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - Clients must never call Ollama directly
 - `ai-gateway` is the only allowed interface to Ollama
 - port `11434` must never be published on the Docker host
+- the production runtime Ollama container can remain without outbound Internet access
+- model preparation is explicit and should copy or pull only requested models such as `mistral:latest` and `nomic-embed-text:latest`
+- do not copy a full host Ollama model store into Docker unless you intentionally want every model there
+- model cache volumes are not expected to contain secrets, but they can be large and should be treated as runtime artifacts
 - Model usage is constrained by an `ALLOWED_MODELS` allowlist
 - The gateway applies note and template size limits before calling Ollama
 - The gateway must not expose Ollama endpoints for `pull`, `delete`, `create`, or `show`
@@ -67,6 +72,28 @@ The raw token is shown only once by the CLI at creation time and must not be log
 - correction and rewriting prompts instruct the model to preserve meaning and avoid unsupported additions
 - assistant requests must not log full selected text, note context, raw bearer tokens, or `Authorization` headers
 - the assistant endpoint is a controlled task endpoint, not a generic Ollama proxy
+
+## Vault RAG safeguards
+
+- Vault RAG is explicit: `/v1/assistant/chat` must never search the vault implicitly
+- `POST /v1/vault/index-note` requires `vault:index`
+- `POST /v1/vault/search` requires `vault:search`
+- `POST /v1/vault/ask` requires `vault:ask`
+- `DELETE /v1/vault/index` requires `vault:admin`
+- `GET /v1/vault/stats` requires `vault:search` or `vault:admin`
+- the backend must not read CouchDB or LiveSync directly; LiveSync E2EE means decrypted note content is available only inside Obsidian
+- indexing is expected to come from the Obsidian plugin, which can see decrypted notes locally
+- RAG data is isolated by `user_id` and `vault_id`
+- excluded directories and tags should be configured with `RAG_INDEX_EXCLUDED_DIRS` and `RAG_INDEX_EXCLUDED_TAGS`
+- private notes should be tagged with an excluded tag such as `noai` or `private`
+- search responses return bounded snippets, not full notes
+- `/v1/vault/ask` must answer only from retrieved sources and must return the sources used
+- note contents, embeddings input text, and full retrieved context must not be logged
+- `RAG_ENABLED=false` disables RAG endpoints cleanly
+- `vault:admin` tokens can delete the user's vault index and should be issued sparingly
+- PostgreSQL + pgvector is the production RAG backend; this does not change the token, user isolation, or logging rules
+- indexed note chunks and embeddings are stored in PostgreSQL, so do not index notes that should remain outside the AI index
+- after deleting an index with `vault:admin`, the plugin must reindex notes before vault questions can use them again
 
 ## Meeting generation safeguards
 

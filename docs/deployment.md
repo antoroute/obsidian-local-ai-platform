@@ -69,21 +69,209 @@ The easiest complete diagnostic is:
 .\scripts\prod\check-stack.ps1 -Mode gpu
 ```
 
-### 1. Preparer Ollama Docker
+### Volumes modeles
 
-Start Ollama with temporary outbound access for model setup:
+The model caches are deliberately separate from application data:
+
+- Ollama models: Docker volume `ollama-data`, mounted at `/root/.ollama`
+- faster-whisper models: Docker volume `whisper-model-cache`, mounted at `/models/whisper`
+- PostgreSQL data: Docker volume `postgres-data`
+- uploaded audio: Docker volume `audio-storage`
+
+With the default `COMPOSE_PROJECT_NAME=obsidian-local-ai-platform`, the effective Docker volume names are `obsidian-local-ai-platform_ollama-data` and `obsidian-local-ai-platform_whisper-model-cache`.
+
+Never delete `postgres-data`, Redis/runtime data, `audio-storage`, or vault files when refreshing models.
+
+To reset only model caches:
 
 ```powershell
-docker compose -f docker-compose.yml -f infra/docker-compose.ollama-model-setup.yml up -d ollama
-docker compose -f docker-compose.yml -f infra/docker-compose.ollama-model-setup.yml exec ollama ollama pull mistral:latest
-docker compose -f docker-compose.yml -f infra/docker-compose.ollama-model-setup.yml exec ollama ollama list
+.\scripts\prod\reset-model-caches.ps1
 ```
 
-Optional stronger model for a larger machine:
+For unattended advanced use:
 
 ```powershell
-docker compose -f docker-compose.yml -f infra/docker-compose.ollama-model-setup.yml exec ollama ollama pull qwen2.5:14b
+.\scripts\prod\reset-model-caches.ps1 -Force
 ```
+
+### 1. Preparer uniquement les modeles necessaires
+
+The runtime Ollama container should not need Internet access. The recommended path is:
+
+1. Pull only the required models on the host Ollama installation.
+2. Copy only the requested manifests and referenced blobs into the Docker `ollama-data` volume.
+3. Run the production stack with Ollama internal-only.
+
+Required default models:
+
+- LLM: `mistral:latest`
+- RAG embeddings: `nomic-embed-text:latest`
+- transcription: faster-whisper `medium`
+
+Prepare the host model store if needed:
+
+```powershell
+ollama list
+ollama pull mistral:latest
+ollama pull nomic-embed-text:latest
+```
+
+`ollama list` on the host must show both `mistral:latest` and `nomic-embed-text:latest` before `-Source host` can copy them into Docker.
+
+Copy only those models into Docker Ollama:
+
+```powershell
+.\scripts\prod\prepare-ollama-models.ps1 `
+  -Mode gpu `
+  -Source host `
+  -Models "mistral:latest,nomic-embed-text:latest"
+```
+
+This script reads `$env:USERPROFILE\.ollama\models`, copies only the selected model manifests and their referenced `sha256` blobs, restarts Docker Ollama, and verifies `ollama list` inside the container.
+
+If you explicitly want Docker Ollama to pull models itself, use `-Source docker`. This is not the default because it requires outbound Internet from the setup container:
+
+```powershell
+.\scripts\prod\prepare-ollama-models.ps1 `
+  -Mode gpu `
+  -Source docker `
+  -Models "mistral:latest,nomic-embed-text:latest"
+```
+
+Prepare faster-whisper:
+
+```powershell
+.\scripts\prod\prepare-whisper-model.ps1 -Mode gpu -Model medium
+```
+
+One-command bootstrap for the normal GPU path:
+
+```powershell
+.\scripts\prod\bootstrap-stack.ps1 `
+  -Mode gpu `
+  -OllamaModels "mistral:latest,nomic-embed-text:latest" `
+  -WhisperModel medium
+```
+
+Add `-ResetModelCaches` when you intentionally want a clean model cache rebuild. It deletes only `ollama-data` and `whisper-model-cache`.
+
+Clean bootstrap with model cache reset:
+
+```powershell
+.\scripts\prod\bootstrap-stack.ps1 `
+  -Mode gpu `
+  -ResetModelCaches `
+  -Force `
+  -OllamaModels "mistral:latest,nomic-embed-text:latest" `
+  -WhisperModel medium
+```
+
+The bootstrap stops and removes only `ollama` and `whisper-worker` containers before deleting model cache volumes. It does not delete PostgreSQL, Redis data, `audio-storage`, or vault files.
+
+Manual verification after model preparation:
+
+```powershell
+docker compose `
+  -f docker-compose.yml `
+  -f infra/docker-compose.prod.external-proxy.yml `
+  -f infra/docker-compose.prod.gpu.yml `
+  exec ollama ollama list
+
+.\scripts\prod\check-stack.ps1 -Mode gpu
+
+docker compose `
+  -f docker-compose.yml `
+  -f infra/docker-compose.prod.external-proxy.yml `
+  -f infra/docker-compose.prod.gpu.yml `
+  exec ai-gateway python -m app.cli check-rag
+```
+
+### RAG vault setup
+
+The RAG backend is prepared in `ai-gateway`, but indexing must come from the Obsidian plugin because LiveSync/CouchDB content is encrypted at rest and must not be read directly by the backend.
+
+Production-like compose uses `pgvector/pgvector:pg16` for PostgreSQL. On startup, the gateway runs `CREATE EXTENSION IF NOT EXISTS vector` and creates the additive RAG tables if they are missing.
+PostgreSQL + pgvector is mandatory for production RAG. SQLite/vector JSON behavior is reserved for unit tests only.
+
+Important variables:
+
+- `RAG_ENABLED=true`
+- `RAG_VECTOR_BACKEND=pgvector`
+- `RAG_EMBEDDING_PROVIDER=ollama`
+- `RAG_EMBEDDING_MODEL=nomic-embed-text:latest`
+- `RAG_EMBEDDING_DIMENSION=768`
+- `RAG_CHUNK_SIZE=900`
+- `RAG_CHUNK_OVERLAP=150`
+- `RAG_MAX_CHUNKS_PER_QUERY=8`
+- `RAG_MAX_CONTEXT_CHARS=24000`
+- `RAG_MIN_SCORE=0.25`
+- `RAG_INDEX_EXCLUDED_DIRS=.obsidian,Templates,Archives,Private`
+- `RAG_INDEX_EXCLUDED_TAGS=noai,private`
+- `RAG_DEFAULT_VAULT_ID=default`
+
+Prepare the embedding model in Docker Ollama through the selective model script:
+
+```powershell
+.\scripts\prod\prepare-ollama-models.ps1 -Mode gpu -Source host -Models "nomic-embed-text:latest"
+```
+
+Verify the RAG runtime from `ai-gateway`:
+
+```powershell
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec ai-gateway python -m app.cli check-rag
+```
+
+`check-rag` verifies:
+
+- `RAG_ENABLED`
+- `RAG_VECTOR_BACKEND=pgvector`
+- `GET http://ollama:11434/api/tags` from inside `ai-gateway`
+- the embedding model exists in Docker Ollama
+- `/api/embed` works with `RAG_EMBEDDING_MODEL`
+- embedding dimension matches `RAG_EMBEDDING_DIMENSION`
+- `/api/chat` works separately with `DEFAULT_MODEL`
+- PostgreSQL connectivity
+- pgvector extension availability
+- `vault_chunks.embedding` type, expected `vector(768)`
+- vector index presence
+- `nomic-embed-text:latest` embedding call and dimension
+
+Migration note:
+
+- if an earlier development build indexed notes with JSON embeddings, those embeddings are not used by the pgvector backend
+- delete/recreate the RAG index or reindex notes after migrating to pgvector
+- when the plugin indexing workflow is added, run a full reindex from Obsidian
+
+Create a full Note Compagnon token for future plugin RAG indexing:
+
+```powershell
+.\scripts\prod\create-token-full.ps1 -Mode gpu -Name note-compagnon-full
+```
+
+Equivalent explicit Docker Compose command:
+
+```powershell
+docker compose `
+  -f docker-compose.yml `
+  -f infra/docker-compose.prod.external-proxy.yml `
+  -f infra/docker-compose.prod.gpu.yml `
+  exec ai-gateway `
+  python -m app.cli create-token --name "note-compagnon-full" --scopes "models:list,notes:summarize,audio:transcribe,meetings:generate,assistant:chat,vault:index,vault:search,vault:ask,vault:admin"
+```
+
+For least privilege, issue separate tokens for indexing (`vault:index`) and asking/searching (`vault:search,vault:ask`) when practical.
+
+Scope meaning:
+
+- `models:list`: list allowed models in the plugin
+- `notes:summarize`: summarize notes
+- `audio:transcribe`: upload audio and create transcription jobs
+- `meetings:generate`: generate meeting minutes
+- `assistant:chat`: use the simple assistant endpoint
+- `vault:index`: index decrypted notes sent by the plugin
+- `vault:search`: search indexed vault chunks and read stats
+- `vault:ask`: ask questions against retrieved vault sources
+- `vault:admin`: delete a user's vault index
 
 ### 2. Preparer Whisper
 
@@ -167,8 +355,7 @@ Expected GPU values:
 Create a token:
 
 ```powershell
-cd apps/ai-gateway
-.\.venv\Scripts\python -m app.cli create-token --name "obsidian-real-dev" --scopes "models:list,notes:summarize,audio:transcribe,meetings:generate,assistant:chat"
+.\scripts\prod\create-token-full.ps1 -Mode gpu -Name note-compagnon-full
 ```
 
 ### 6. Reverse proxy externe
@@ -387,7 +574,7 @@ Create a development token:
 
 ```powershell
 cd apps/ai-gateway
-.\.venv\Scripts\python -m app.cli create-token --name "obsidian-real-dev" --scopes "models:list,notes:summarize,audio:transcribe,meetings:generate,assistant:chat"
+.\.venv\Scripts\python -m app.cli create-token --name "obsidian-real-dev" --scopes "models:list,notes:summarize,audio:transcribe,meetings:generate,assistant:chat,vault:index,vault:search,vault:ask,vault:admin"
 ```
 
 Configure Obsidian with:

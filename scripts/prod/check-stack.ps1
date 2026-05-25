@@ -77,7 +77,7 @@ function Print-EffectiveRuntimeConfiguration {
     param([string[]]$ComposeFiles)
 
     Write-Host "Effective runtime configuration" -ForegroundColor Cyan
-    foreach ($name in @("LLM_PROVIDER", "OLLAMA_BASE_URL", "DEFAULT_MODEL", "ALLOWED_MODELS")) {
+    foreach ($name in @("LLM_PROVIDER", "OLLAMA_BASE_URL", "DEFAULT_MODEL", "ALLOWED_MODELS", "RAG_VECTOR_BACKEND", "RAG_EMBEDDING_MODEL", "RAG_EMBEDDING_DIMENSION")) {
         $value = Get-GatewayEnv -ComposeFiles $ComposeFiles -Name $name
         Write-Host "ai-gateway $name=$value"
     }
@@ -86,6 +86,81 @@ function Print-EffectiveRuntimeConfiguration {
         Write-Host "whisper-worker $name=$value"
     }
     Write-Host ""
+}
+
+function Get-GatewayHealthUrls {
+    param([string[]]$ComposeFiles)
+
+    if ($env:GATEWAY_BIND_ADDRESS -and $env:GATEWAY_BIND_PORT) {
+        $hostAddress = $env:GATEWAY_BIND_ADDRESS
+        if ($hostAddress -eq "0.0.0.0") {
+            $hostAddress = "127.0.0.1"
+        }
+        return @("http://${hostAddress}:$($env:GATEWAY_BIND_PORT)/v1/health")
+    }
+
+    $published = docker compose @ComposeFiles port ai-gateway 8000 2>$null
+    if ($LASTEXITCODE -eq 0 -and $published) {
+        return @("http://$published/v1/health", "http://127.0.0.1:8000/v1/health")
+    }
+
+    return @("http://127.0.0.1:8000/v1/health")
+}
+
+function Test-GatewayHealthFromHost {
+    param([string[]]$ComposeFiles)
+
+    $urls = Get-GatewayHealthUrls -ComposeFiles $ComposeFiles
+    $lastError = $null
+    foreach ($url in $urls) {
+        Write-Host "Checking Gateway health at $url ..." -ForegroundColor Cyan
+        try {
+            $health = Invoke-RestMethod -Uri $url -TimeoutSec 10
+            if ($health.status -eq "ok") {
+                Write-Host "OK Gateway health at $url" -ForegroundColor Green
+                return
+            }
+            $lastError = "Gateway health at $url did not return status=ok."
+        } catch {
+            $lastError = $_.Exception.Message
+        }
+    }
+
+    Write-Host "Host health check failed. Checking health inside ai-gateway container..." -ForegroundColor Yellow
+    docker compose @ComposeFiles exec ai-gateway python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/v1/health', timeout=10).read().decode())"
+    if ($LASTEXITCODE -eq 0) {
+        throw "Gateway is healthy inside container but not reachable from host. Check ports/GATEWAY_BIND_ADDRESS/firewall. Last host error: $lastError"
+    }
+    throw "Gateway health failed from host and inside container. Last host error: $lastError"
+}
+
+function Get-OllamaModels {
+    param([string[]]$ComposeFiles)
+
+    $list = docker compose @ComposeFiles exec -T ollama ollama list
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not list models inside Docker Ollama."
+    }
+
+    Write-Host "Docker Ollama models:" -ForegroundColor Cyan
+    $list | ForEach-Object { Write-Host $_ }
+
+    return @($list | Select-Object -Skip 1 | ForEach-Object {
+        ($_ -split "\s+")[0]
+    } | Where-Object { $_ })
+}
+
+function Assert-OllamaModelPresent {
+    param(
+        [string[]]$Models,
+        [string]$Model,
+        [string]$MissingMessage
+    )
+
+    if ($Models -notcontains $Model) {
+        throw $MissingMessage
+    }
+    Write-Host "OK Docker Ollama model present: $Model" -ForegroundColor Green
 }
 
 function Assert-WorkerEnv {
@@ -124,12 +199,7 @@ try {
     $composeFiles = Get-ComposeFiles -SelectedMode $Mode
     Print-EffectiveRuntimeConfiguration -ComposeFiles $composeFiles
 
-    Write-Host "Checking Gateway health..." -ForegroundColor Cyan
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:8000/v1/health" -TimeoutSec 10
-    if ($health.status -ne "ok") {
-        throw "Gateway healthcheck did not return status=ok."
-    }
-    Write-Host "OK Gateway health" -ForegroundColor Green
+    Test-GatewayHealthFromHost -ComposeFiles $composeFiles
 
     $llmProvider = Get-GatewayEnv -ComposeFiles $composeFiles -Name "LLM_PROVIDER"
     if ($llmProvider -ne "ollama") {
@@ -145,7 +215,14 @@ try {
 
     Write-Host "Checking Ollama from ai-gateway..." -ForegroundColor Cyan
     docker compose @composeFiles exec ai-gateway python -m app.cli check-ollama --model mistral:latest
+    if ($LASTEXITCODE -ne 0) {
+        throw "Ollama connectivity or model check failed from ai-gateway."
+    }
     Write-Host "OK Ollama" -ForegroundColor Green
+
+    $ollamaModels = Get-OllamaModels -ComposeFiles $composeFiles
+    Assert-OllamaModelPresent -Models $ollamaModels -Model "mistral:latest" -MissingMessage "LLM model missing. Run scripts/prod/prepare-ollama-models.ps1 -Models 'mistral:latest,nomic-embed-text:latest'"
+    Assert-OllamaModelPresent -Models $ollamaModels -Model "nomic-embed-text:latest" -MissingMessage "Embedding model missing. Run scripts/prod/prepare-ollama-models.ps1 -Models 'mistral:latest,nomic-embed-text:latest'"
 
     Assert-WorkerEnv -ComposeFiles $composeFiles -Name "TRANSCRIPTION_ENGINE" -Expected "faster_whisper"
 
@@ -160,11 +237,15 @@ try {
 
     Write-Host "Checking whisper-worker engine..." -ForegroundColor Cyan
     docker compose @composeFiles exec whisper-worker python -m whisper_worker check-engine
+    if ($LASTEXITCODE -ne 0) {
+        $configuredWhisperModel = Get-WorkerEnv -ComposeFiles $composeFiles -Name "WHISPER_MODEL_SIZE"
+        throw "Whisper model missing. Run scripts/prod/prepare-whisper-model.ps1 -Model $configuredWhisperModel -Mode $Mode"
+    }
     Write-Host "OK Whisper" -ForegroundColor Green
 
     $gatewayPort = docker compose @composeFiles port ai-gateway 8000
-    if ($gatewayPort -notlike "127.0.0.1:8000") {
-        throw "ai-gateway is not published as 127.0.0.1:8000."
+    if (-not $gatewayPort) {
+        throw "ai-gateway does not publish port 8000 to the host."
     }
 
     Assert-ServiceHasNoPublishedPort -ComposeFiles $composeFiles -Service "ollama" -Port 11434
@@ -186,8 +267,9 @@ try {
     }
     Write-Host ""
     Write-Host "Actionable checks:" -ForegroundColor Yellow
+    Write-Host '.\scripts\prod\prepare-ollama-models.ps1 -Models "mistral:latest,nomic-embed-text:latest" -Mode gpu -Source host' -ForegroundColor Yellow
     Write-Host '.\scripts\prod\prepare-whisper-model.ps1 -Model medium -Mode gpu' -ForegroundColor Yellow
-    Write-Host 'docker compose -f docker-compose.yml -f infra/docker-compose.ollama-model-setup.yml exec ollama ollama list' -ForegroundColor Yellow
+    Write-Host 'docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec ollama ollama list' -ForegroundColor Yellow
     Write-Host 'docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml logs ai-gateway' -ForegroundColor Yellow
     Write-Host 'docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml logs whisper-worker' -ForegroundColor Yellow
     exit 1

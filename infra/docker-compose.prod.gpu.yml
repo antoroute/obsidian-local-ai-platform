@@ -3,6 +3,11 @@ services:
     environment:
       LLM_PROVIDER: ollama
       OLLAMA_BASE_URL: http://ollama:11434
+      RAG_ENABLED: "true"
+      RAG_VECTOR_BACKEND: pgvector
+      RAG_EMBEDDING_PROVIDER: ollama
+      RAG_EMBEDDING_MODEL: nomic-embed-text:latest
+      RAG_EMBEDDING_DIMENSION: "768"
 
   ollama:
     gpus:
