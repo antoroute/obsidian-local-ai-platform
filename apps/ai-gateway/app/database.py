@@ -102,6 +102,7 @@ def ensure_pgvector_support(engine: Engine) -> None:
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_chunks_document ON vault_chunks (document_id)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_documents_user_vault_path ON vault_documents (user_id, vault_id, path)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_documents_workspace_vault_path ON vault_documents (workspace_id, vault_id, path)"))
+        connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_vault_document_workspace_vault_path_idx ON vault_documents (workspace_id, vault_id, path)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_chunks_path ON vault_chunks (path)"))
     try:
         with engine.begin() as connection:

@@ -146,6 +146,22 @@ Use `Tester la recherche RAG` when an answer seems weak. It displays the retriev
 
 If several generated tokens created separate RAG spaces, use a full/admin token, run `Reinitialiser tout l'index du vault`, then reindex once with `Workspace RAG = default`.
 
+### Tester la synchronisation RAG automatique
+
+1. Active `Activer la connaissance du vault`.
+2. Mets `Mode d'indexation = Automatique`.
+3. Cree `Inbox/Test RAG Update.md` avec `ALPHA-RAG-001`.
+4. Attends la fin de l'indexation et verifie avec `Tester la recherche RAG` que `ALPHA-RAG-001` ressort.
+5. Remplace le contenu par `BETA-RAG-002`.
+6. Verifie que `BETA-RAG-002` ressort.
+7. Verifie que `ALPHA-RAG-001` ne ressort plus.
+8. Supprime la note et verifie que `BETA-RAG-002` ne ressort plus.
+9. Cree une note contenant `RENAME-RAG-003`.
+10. Renomme ou deplace la note.
+11. Verifie que l'ancien chemin n'apparait plus et que le nouveau chemin ressort.
+
+En mode `Manuelle`, ces hooks ne declenchent pas d'indexation automatique. Les suppressions et renommages automatiques nettoient l'index seulement quand le mode automatique est actif.
+
 ## Selected Text Actions
 
 Command palette and editor context menu actions:

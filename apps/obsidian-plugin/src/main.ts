@@ -435,7 +435,10 @@ interface VaultStatsResponsePayload {
 interface VaultDeleteResponsePayload {
   vault_id: string;
   workspace_id?: string | null;
+  path?: string | null;
   all_users?: boolean;
+  document_deleted?: boolean;
+  chunks_deleted?: number;
   deleted_documents: number;
   deleted_chunks: number;
 }
@@ -449,6 +452,7 @@ interface VaultIndexProgress {
   errors: number;
   remaining: number;
   currentPath: string;
+  trigger: string;
   state: "idle" | "scanning" | "indexing" | "done" | "failed" | "cancelled";
   label: string;
   startedAt: number;
@@ -460,8 +464,16 @@ interface RagLocalFileState {
   mtime: number;
   size: number;
   last_indexed_at: string;
-  last_status: "indexed" | "skipped" | "error";
+  last_status: "pending" | "indexed" | "skipped" | "error" | "deleted";
   last_error?: string;
+}
+
+interface RagRecentOperation {
+  timestamp: string;
+  action: "create" | "modify" | "delete" | "rename" | "manual" | "auto";
+  path: string;
+  oldPath?: string;
+  result: string;
 }
 
 interface RecordingStopResult {
@@ -513,6 +525,7 @@ interface PluginSettings {
   ragLastIndexedAt: string;
   ragLastIndexingStatus: string;
   ragLastIndexingError: string;
+  ragRecentOperations: RagRecentOperation[];
   dashboardVaultExpanded: boolean;
   dashboardTemplatesExpanded: boolean;
   dashboardStatusExpanded: boolean;
@@ -555,6 +568,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   ragLastIndexedAt: "",
   ragLastIndexingStatus: "idle",
   ragLastIndexingError: "",
+  ragRecentOperations: [],
   dashboardVaultExpanded: false,
   dashboardTemplatesExpanded: false,
   dashboardStatusExpanded: false,
@@ -567,7 +581,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
   audioInputDevices: AudioInputDeviceChoice[] = [{ deviceId: "", label: "Default microphone" }];
   ragIndexProgress: VaultIndexProgress = createIdleVaultIndexProgress();
   private ragAutoIndexTimers = new Map<string, number>();
-  private ragIndexQueue: TFile[] = [];
+  private ragIndexQueue: Array<{ file: TFile; reason: RagRecentOperation["action"] }> = [];
   private ragIndexQueueRunning = false;
   private ragIndexCancelRequested = false;
 
@@ -581,12 +595,12 @@ export default class LocalAiPlatformPlugin extends Plugin {
         this.addEditorContextMenuItems(menu, editor);
       }),
     );
-    this.registerEvent(this.app.vault.on("modify", (file) => this.handleRagAutoIndexFile(file)));
-    this.registerEvent(this.app.vault.on("create", (file) => this.handleRagAutoIndexFile(file)));
-    this.registerEvent(this.app.vault.on("rename", (file) => this.handleRagAutoIndexFile(file)));
+    this.registerEvent(this.app.vault.on("modify", (file) => this.handleRagAutoIndexFile(file, "modify")));
+    this.registerEvent(this.app.vault.on("create", (file) => this.handleRagAutoIndexFile(file, "create")));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.handleRagRename(file, oldPath)));
     this.registerEvent(this.app.vault.on("delete", (file) => {
       if (file instanceof TFile) {
-        void this.deleteVaultDocument(file.path).catch((error) => console.warn("Note Compagnon failed to delete RAG document", { path: file.path, message: error instanceof Error ? error.message : "unknown" }));
+        void this.handleRagDeletePath(file.path);
       }
     }));
     this.registerInterval(window.setInterval(() => {
@@ -1621,7 +1635,13 @@ export default class LocalAiPlatformPlugin extends Plugin {
       unavailableMessage: "AI Gateway inaccessible.",
       invalidJsonMessage: "The AI Gateway returned an invalid vault delete response.",
     });
-    delete this.settings.ragLocalIndexState[path];
+    this.settings.ragLocalIndexState[path] = {
+      path,
+      mtime: 0,
+      size: 0,
+      last_indexed_at: new Date().toISOString(),
+      last_status: "deleted",
+    };
     await this.saveSettings();
   }
 
@@ -1677,7 +1697,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
     new Notice(`Vault indexe. Indexees: ${progress.indexed}, ignorees: ${progress.ignored}, skipped: ${progress.skipped}, erreurs: ${progress.errors}.`, 10000);
   }
 
-  async indexVaultFiles(files: TFile[], label: string): Promise<VaultIndexProgress> {
+  async indexVaultFiles(files: TFile[], label: string, trigger = "manual"): Promise<VaultIndexProgress> {
     this.validateCoreSettings();
     this.ragIndexCancelRequested = false;
     const progress: VaultIndexProgress = {
@@ -1689,6 +1709,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       errors: 0,
       remaining: files.length,
       currentPath: "",
+      trigger,
       state: "indexing",
       label,
       startedAt: Date.now(),
@@ -1718,6 +1739,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
           }
         } else {
           progress.indexed += 1;
+          this.recordRagOperation("manual", files[index].path, "indexed");
         }
       } catch (error) {
         progress.errors += 1;
@@ -1759,7 +1781,11 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return this.ragIndexQueue.length;
   }
 
-  handleRagAutoIndexFile(file: TAbstractFile): void {
+  shouldIndexFile(file: TAbstractFile): file is TFile {
+    return file instanceof TFile && file.extension === "md" && !this.isPathExcludedFromRag(file.path);
+  }
+
+  handleRagAutoIndexFile(file: TAbstractFile, reason: "create" | "modify" | "rename" = "modify"): void {
     if (!this.shouldAutoIndex() || !(file instanceof TFile) || file.extension !== "md") {
       return;
     }
@@ -1769,14 +1795,22 @@ export default class LocalAiPlatformPlugin extends Plugin {
     }
     const timer = window.setTimeout(() => {
       this.ragAutoIndexTimers.delete(file.path);
-      this.enqueueRagIndex(file);
+      this.enqueueRagIndex(file, reason);
     }, Math.max(1000, this.settings.ragAutoIndexDebounceMs || 5000));
     this.ragAutoIndexTimers.set(file.path, timer);
+    this.settings.ragLocalIndexState[file.path] = {
+      path: file.path,
+      mtime: file.stat.mtime,
+      size: file.stat.size,
+      last_indexed_at: new Date().toISOString(),
+      last_status: "pending",
+    };
+    this.recordRagOperation(reason, file.path, "pending");
   }
 
-  enqueueRagIndex(file: TFile): void {
-    if (!this.ragIndexQueue.some((queued) => queued.path === file.path)) {
-      this.ragIndexQueue.push(file);
+  enqueueRagIndex(file: TFile, reason: "create" | "modify" | "rename" | "manual" | "auto" = "auto"): void {
+    if (!this.ragIndexQueue.some((queued) => queued.file.path === file.path)) {
+      this.ragIndexQueue.push({ file, reason });
     }
     this.ragIndexProgress = {
       ...createIdleVaultIndexProgress(),
@@ -1784,6 +1818,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       total: this.ragIndexQueue.length,
       remaining: this.ragIndexQueue.length,
       state: "indexing",
+      trigger: reason,
       startedAt: Date.now(),
     };
     this.settings.ragLastIndexingStatus = `${this.ragIndexQueue.length} notes en attente`;
@@ -1803,8 +1838,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
           this.ragIndexProgress.state = "cancelled";
           break;
         }
-        const file = this.ragIndexQueue.shift();
-        if (!file) continue;
+        const item = this.ragIndexQueue.shift();
+        if (!item) continue;
+        const { file, reason } = item;
         this.ragIndexProgress.currentPath = file.path;
         this.ragIndexProgress.remaining = this.ragIndexQueue.length + 1;
         try {
@@ -1817,10 +1853,13 @@ export default class LocalAiPlatformPlugin extends Plugin {
           const result = await this.indexVaultNote(file);
           if (!result) {
             this.ragIndexProgress.ignored += 1;
+            this.recordRagOperation(reason, file.path, "ignored");
           } else if (result.status === "skipped") {
             this.ragIndexProgress.skipped += 1;
+            this.recordRagOperation(reason, file.path, "skipped");
           } else {
             this.ragIndexProgress.indexed += 1;
+            this.recordRagOperation(reason, file.path, "indexed");
           }
         } catch (error) {
           this.ragIndexProgress.errors += 1;
@@ -1835,6 +1874,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
           this.settings.ragLastIndexingStatus = "error";
           this.settings.ragLastIndexingError = error instanceof Error ? error.message : "Unknown error";
           await this.saveSettings();
+          this.recordRagOperation(reason, file.path, "error");
         }
         this.ragIndexProgress.processed += 1;
         this.ragIndexProgress.remaining = this.ragIndexQueue.length;
@@ -1852,6 +1892,59 @@ export default class LocalAiPlatformPlugin extends Plugin {
       this.ragIndexProgress.currentPath = "";
       this.ragIndexProgress.finishedAt = Date.now();
     }
+  }
+
+  async handleRagDeletePath(path: string): Promise<void> {
+    if (!this.shouldAutoIndex()) {
+      return;
+    }
+    try {
+      await this.deleteVaultDocument(path);
+      this.recordRagOperation("delete", path, "deleted");
+    } catch (error) {
+      this.recordRagOperation("delete", path, "error");
+      console.warn("Note Compagnon failed to delete RAG document", { path, message: error instanceof Error ? error.message : "unknown" });
+    }
+  }
+
+  handleRagRename(file: TAbstractFile, oldPath: string): void {
+    if (!this.shouldAutoIndex()) {
+      return;
+    }
+    void this.handleRenamePath(oldPath, file instanceof TFile ? file.path : oldPath, file);
+  }
+
+  async handleRenamePath(oldPath: string, newPath: string, file?: TAbstractFile): Promise<void> {
+    if (!this.shouldAutoIndex()) {
+      return;
+    }
+    try {
+      await this.deleteVaultDocument(oldPath);
+      delete this.settings.ragLocalIndexState[oldPath];
+      this.recordRagOperation("rename", newPath, "old path deleted", oldPath);
+      if (file instanceof TFile && file.extension === "md") {
+        this.handleRagAutoIndexFile(file, "rename");
+      }
+      await this.saveSettings();
+    } catch (error) {
+      this.recordRagOperation("rename", newPath, "error", oldPath);
+      console.warn("Note Compagnon failed to rename RAG document", { oldPath, newPath, message: error instanceof Error ? error.message : "unknown" });
+    }
+  }
+
+  recordRagOperation(action: RagRecentOperation["action"], path: string, result: string, oldPath?: string): void {
+    this.settings.ragRecentOperations = [
+      {
+        timestamp: new Date().toISOString(),
+        action,
+        path,
+        oldPath,
+        result,
+      },
+      ...(this.settings.ragRecentOperations || []),
+    ].slice(0, 20);
+    console.debug("Note Compagnon RAG event", { action, path, oldPath, result });
+    void this.saveSettings();
   }
 
   async scanModifiedNotesForRag(force = false): Promise<void> {
@@ -2665,7 +2758,7 @@ class NoteCompagnonDashboardView extends ItemView {
     box.style.margin = "8px 0";
     const percent = progress.total > 0 ? Math.round((progress.processed / progress.total) * 100) : 0;
     box.createEl("strong", { text: progress.label || "Indexation RAG" });
-    box.createEl("div", { text: `Etat: ${progress.state} | ${progress.processed}/${progress.total} notes traitees (${percent}%)` });
+    box.createEl("div", { text: `Etat: ${progress.state} | Declencheur: ${progress.trigger || "manual"} | ${progress.processed}/${progress.total} notes traitees (${percent}%)` });
     const barOuter = box.createDiv();
     barOuter.style.height = "8px";
     barOuter.style.background = "var(--background-modifier-border)";
@@ -2681,6 +2774,17 @@ class NoteCompagnonDashboardView extends ItemView {
       box.createEl("div", { text: `Note en cours: ${progress.currentPath}` });
     }
     box.createEl("div", { text: `Temps ecoule: ${formatElapsedTime(progress.startedAt, progress.finishedAt)}` });
+    const operations = this.plugin.settings.ragRecentOperations || [];
+    if (operations.length > 0) {
+      const details = box.createEl("details");
+      details.createEl("summary", { text: "Dernieres operations RAG" });
+      const list = details.createEl("ul");
+      for (const operation of operations.slice(0, 10)) {
+        const time = new Date(operation.timestamp).toLocaleTimeString();
+        const renamePart = operation.oldPath ? `${operation.oldPath} -> ` : "";
+        list.createEl("li", { text: `${time} ${operation.action} ${renamePart}${operation.path} ${operation.result}` });
+      }
+    }
   }
 
   private async sendChatMessage(message: string): Promise<void> {
@@ -3648,6 +3752,7 @@ function createIdleVaultIndexProgress(): VaultIndexProgress {
     errors: 0,
     remaining: 0,
     currentPath: "",
+    trigger: "manual",
     state: "idle",
     label: "Indexation RAG",
     startedAt: Date.now(),

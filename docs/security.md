@@ -85,6 +85,7 @@ Production scripts may invoke the token CLI, but they must not write the raw tok
 - the backend must not read CouchDB or LiveSync directly; LiveSync E2EE means decrypted note content is available only inside Obsidian
 - indexing is expected to come from the Obsidian plugin, which can see decrypted notes locally
 - automatic indexing, if enabled, still runs only from the Obsidian plugin and only while Obsidian is open
+- automatic delete/rename cleanup removes only RAG index rows for the selected workspace/vault/path, never local files
 - RAG data is isolated by `workspace_id` and `vault_id`; when no workspace is provided, the backend falls back to the token `user_id`
 - for personal deployments, use a stable `RAG_WORKSPACE_ID` / plugin Workspace RAG value so regenerated tokens share the same vault index
 - multiplying tokens without a shared workspace can create separate historical RAG spaces

@@ -121,6 +121,21 @@ def test_index_note_modified_replaces_old_chunks(client: TestClient) -> None:
         assert all("modifie" in chunk.content for chunk in chunks)
 
 
+def test_reindex_same_path_removes_old_chunk_content(client: TestClient) -> None:
+    app.dependency_overrides[get_embedding_client] = lambda: FakeEmbeddingClient()
+    token = create_token(["vault:index"], user_id="replace-user")
+    first = client.post("/v1/vault/index-note", headers=bearer(token), json=index_payload("# RAG\n\nALPHA-RAG-001 old content."))
+    assert first.status_code == 200
+
+    second = client.post("/v1/vault/index-note", headers=bearer(token), json=index_payload("# RAG\n\nBETA-RAG-002 new content."))
+    assert second.status_code == 200
+
+    with get_session_factory()() as session:
+        contents = [chunk.content for chunk in session.query(VaultChunk).all()]
+        assert any("BETA-RAG-002" in content for content in contents)
+        assert not any("ALPHA-RAG-001" in content for content in contents)
+
+
 def test_search_requires_vault_search_scope(client: TestClient) -> None:
     token = create_token(["vault:index"])
     response = client.post("/v1/vault/search", headers=bearer(token), json={"vault_id": "default", "query": "CouchDB"})
@@ -210,6 +225,8 @@ def test_delete_document_requires_vault_index_and_removes_only_path(client: Test
     deleted = client.delete("/v1/vault/document?vault_id=default&path=Projects%2FRAG.md", headers=bearer(index_token))
     assert deleted.status_code == 200
     assert deleted.json()["deleted_documents"] == 1
+    assert deleted.json()["document_deleted"] is True
+    assert deleted.json()["path"] == "Projects/RAG.md"
     assert deleted.json()["deleted_chunks"] >= 1
 
     stats = client.get("/v1/vault/stats?vault_id=default", headers=bearer(search_token))

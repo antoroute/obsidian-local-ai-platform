@@ -303,11 +303,14 @@ curl -X DELETE "$API_BASE_URL/v1/vault/index?vault_id=default&all_users=true" \
 Required scope: `vault:index`
 
 Deletes one indexed document for the selected workspace and vault. This is intended for Obsidian rename/delete cleanup and never deletes a local Obsidian note.
+If the document does not exist, the endpoint returns `200 OK` with `document_deleted=false`.
 
 ```bash
 curl -X DELETE "$API_BASE_URL/v1/vault/document?vault_id=default&path=Projects%2FRAG.md" \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+Response fields include `path`, `workspace_id`, `document_deleted`, `chunks_deleted`, `deleted_documents`, and `deleted_chunks`.
 
 RAG error behavior:
 

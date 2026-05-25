@@ -494,7 +494,7 @@ def vault_delete_index(
         documents = int(session.scalar(select(func.count()).select_from(VaultDocument).where(VaultDocument.workspace_id == selected_workspace_id, VaultDocument.vault_id == selected_vault_id)) or 0)
         session.execute(delete(VaultDocument).where(VaultDocument.workspace_id == selected_workspace_id, VaultDocument.vault_id == selected_vault_id))
     session.commit()
-    return VaultDeleteResponse(vault_id=selected_vault_id, workspace_id=selected_workspace_id, all_users=all_users, deleted_documents=documents, deleted_chunks=chunks)
+    return VaultDeleteResponse(vault_id=selected_vault_id, workspace_id=selected_workspace_id, all_users=all_users, document_deleted=documents > 0, chunks_deleted=chunks, deleted_documents=documents, deleted_chunks=chunks)
 
 
 @app.delete("/v1/vault/document", tags=["vault"], response_model=VaultDeleteResponse)
@@ -513,11 +513,11 @@ def vault_delete_document(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="path is required.")
     document = session.scalar(select(VaultDocument).where(VaultDocument.workspace_id == selected_workspace_id, VaultDocument.vault_id == selected_vault_id, VaultDocument.path == path))
     if document is None:
-        return VaultDeleteResponse(vault_id=selected_vault_id, workspace_id=selected_workspace_id, deleted_documents=0, deleted_chunks=0)
+        return VaultDeleteResponse(vault_id=selected_vault_id, workspace_id=selected_workspace_id, path=path, document_deleted=False, chunks_deleted=0, deleted_documents=0, deleted_chunks=0)
     chunks = int(session.scalar(select(func.count()).select_from(VaultChunk).where(VaultChunk.document_id == document.id)) or 0)
     session.delete(document)
     session.commit()
-    return VaultDeleteResponse(vault_id=selected_vault_id, workspace_id=selected_workspace_id, deleted_documents=1, deleted_chunks=chunks)
+    return VaultDeleteResponse(vault_id=selected_vault_id, workspace_id=selected_workspace_id, path=path, document_deleted=True, chunks_deleted=chunks, deleted_documents=1, deleted_chunks=chunks)
 
 
 def build_vault_debug_info(hits, settings) -> dict[str, object]:

@@ -213,6 +213,9 @@ class VaultStatsResponse(BaseModel):
 class VaultDeleteResponse(BaseModel):
     vault_id: str
     workspace_id: str | None = None
+    path: str | None = None
     all_users: bool = False
+    document_deleted: bool = False
+    chunks_deleted: int = 0
     deleted_documents: int
     deleted_chunks: int

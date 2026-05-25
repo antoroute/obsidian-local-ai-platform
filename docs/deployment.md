@@ -265,6 +265,14 @@ After the purge:
 2. keep `Workspace RAG = default` in the plugin
 3. reindex from Obsidian
 
+Automatic RAG sync from Obsidian:
+
+- `create` and `modify` on Markdown notes queue an index/reindex after debounce
+- `delete` calls `DELETE /v1/vault/document` for the removed path
+- `rename` / move deletes the old path, then queues the new path
+- none of these hooks run in manual indexing mode
+- the dashboard shows the current progress and the last RAG operations
+
 Create a full Note Compagnon token for future plugin RAG indexing:
 
 ```powershell
