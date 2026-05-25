@@ -31,6 +31,7 @@ const DEFAULT_RECORDING_MIME_TYPE = "audio/webm";
 const SUPPORTED_AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".webm", ".ogg"]);
 type TemplateInstallSet = "minimal" | "fr" | "en" | "all";
 type TemplateGroup = "meeting_note" | "meeting_summary" | "actions" | "technical" | "client" | "other";
+type AssistantResponseMode = "simple" | "current_note" | "vault";
 type RecordingSource = "microphone_only" | "computer_audio_only" | "microphone_plus_computer_audio" | "experimental_system_capture" | "selected_audio_input";
 type RecordingSourceUsed =
   | "microphone_only"
@@ -374,6 +375,59 @@ interface ActiveRecordingSession {
   chunks: BlobPart[];
 }
 
+interface VaultIndexNotePayload {
+  vault_id: string;
+  path: string;
+  title: string;
+  content: string;
+  modified_at: string;
+  tags: string[];
+  frontmatter: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+}
+
+interface VaultIndexNoteResponsePayload {
+  status: "indexed" | "skipped";
+  document_id: string;
+  path: string;
+  chunks_indexed: number;
+  content_hash: string;
+}
+
+interface VaultSourcePayload {
+  path: string;
+  title: string | null;
+  heading_path: string | null;
+  chunk_index: number;
+  score: number;
+}
+
+interface VaultAskResponsePayload {
+  model: string;
+  answer_markdown: string;
+  sources: VaultSourcePayload[];
+}
+
+interface VaultStatsResponsePayload {
+  vault_id: string;
+  documents: number;
+  chunks: number;
+  last_indexed_at: string | null;
+}
+
+interface VaultDeleteResponsePayload {
+  vault_id: string;
+  deleted_documents: number;
+  deleted_chunks: number;
+}
+
+interface VaultIndexProgress {
+  total: number;
+  indexed: number;
+  skipped: number;
+  errors: number;
+}
+
 interface RecordingStopResult {
   blob: Blob;
   title: string;
@@ -407,6 +461,13 @@ interface PluginSettings {
   audioInputDeviceLabel: string;
   quickActionsLanguage: "same_as_input" | "fr" | "en";
   chatUseCurrentNoteContext: boolean;
+  assistantResponseMode: AssistantResponseMode;
+  ragEnabled: boolean;
+  vaultId: string;
+  ragExcludedFolders: string;
+  ragExcludedTags: string;
+  ragMaxFileChars: number;
+  dashboardVaultExpanded: boolean;
   dashboardTemplatesExpanded: boolean;
   dashboardStatusExpanded: boolean;
 }
@@ -431,6 +492,13 @@ const DEFAULT_SETTINGS: PluginSettings = {
   audioInputDeviceLabel: "Default microphone",
   quickActionsLanguage: "same_as_input",
   chatUseCurrentNoteContext: false,
+  assistantResponseMode: "simple",
+  ragEnabled: true,
+  vaultId: "default",
+  ragExcludedFolders: ".obsidian,Templates,Archives,Private",
+  ragExcludedTags: "noai,private",
+  ragMaxFileChars: 500000,
+  dashboardVaultExpanded: false,
   dashboardTemplatesExpanded: false,
   dashboardStatusExpanded: false,
 };
@@ -848,6 +916,23 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
   getQuickActionsLanguage(): "same_as_input" | "fr" | "en" {
     return this.settings.quickActionsLanguage || "same_as_input";
+  }
+
+  getVaultId(): string {
+    return this.settings.vaultId.trim() || "default";
+  }
+
+  getRagExcludedFolders(): string[] {
+    return parseCommaSeparatedList(this.settings.ragExcludedFolders || DEFAULT_SETTINGS.ragExcludedFolders);
+  }
+
+  getRagExcludedTags(): string[] {
+    return parseCommaSeparatedList(this.settings.ragExcludedTags || DEFAULT_SETTINGS.ragExcludedTags).map((tag) => tag.replace(/^#/, ""));
+  }
+
+  getRagMaxFileChars(): number {
+    const value = Number(this.settings.ragMaxFileChars);
+    return Number.isFinite(value) && value > 0 ? value : DEFAULT_SETTINGS.ragMaxFileChars;
   }
 
   getTranscriptionLanguage(): "auto" | "fr" | "en" {
@@ -1315,6 +1400,201 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return this.parseAssistantChatResponse(responseText);
   }
 
+  async requestVaultIndexNote(apiBaseUrl: string, apiToken: string, payload: VaultIndexNotePayload): Promise<VaultIndexNoteResponsePayload> {
+    const responseText = await this.performJsonRequest({
+      apiBaseUrl,
+      apiToken,
+      path: "/v1/vault/index-note",
+      method: "POST",
+      body: JSON.stringify(payload),
+      errorMap: {
+        401: "Token invalide ou expire.",
+        403: "Le token n'a pas le droit vault:index.",
+        413: "La note est trop volumineuse pour l'indexation.",
+        422: "La note ne peut pas etre indexee.",
+        503: "La connaissance du vault n'est pas activee cote serveur, ou le modele d'embedding est absent.",
+      },
+      unavailableMessage: "AI Gateway inaccessible.",
+      invalidJsonMessage: "The AI Gateway returned an invalid vault indexing response.",
+    });
+    return this.parseVaultIndexNoteResponse(responseText);
+  }
+
+  async askVault(question: string): Promise<VaultAskResponsePayload> {
+    if (!this.settings.ragEnabled) {
+      throw new UserFacingError("La connaissance du vault est desactivee dans les reglages.");
+    }
+    const responseText = await this.performJsonRequest({
+      apiBaseUrl: this.getApiBaseUrl(),
+      apiToken: this.getApiToken(),
+      path: "/v1/vault/ask",
+      method: "POST",
+      body: JSON.stringify({
+        vault_id: this.getVaultId(),
+        question,
+        model: this.getDefaultModel(),
+        top_k: 8,
+        answer_language: "same_as_input",
+      }),
+      errorMap: {
+        401: "Token invalide ou expire.",
+        403: "Le token n'a pas le droit vault:ask, ou le modele est refuse.",
+        422: "La question RAG est invalide.",
+        502: "Le backend RAG a retourne une reponse invalide.",
+        503: "La connaissance du vault n'est pas activee cote serveur, ou le modele d'embedding est absent.",
+      },
+      unavailableMessage: "AI Gateway inaccessible.",
+      invalidJsonMessage: "The AI Gateway returned an invalid vault answer.",
+    });
+    const parsed = this.parseVaultAskResponse(responseText);
+    if (parsed.sources.length === 0) {
+      new Notice("Aucune note indexee ou pas assez d'informations trouvees pour ce vault.", 8000);
+    }
+    return parsed;
+  }
+
+  async getVaultStats(): Promise<VaultStatsResponsePayload> {
+    const responseText = await this.performJsonRequest({
+      apiBaseUrl: this.getApiBaseUrl(),
+      apiToken: this.getApiToken(),
+      path: `/v1/vault/stats?vault_id=${encodeURIComponent(this.getVaultId())}`,
+      method: "GET",
+      errorMap: {
+        401: "Token invalide ou expire.",
+        403: "Le token n'a pas le droit vault:search.",
+        503: "La connaissance du vault n'est pas activee cote serveur.",
+      },
+      unavailableMessage: "AI Gateway inaccessible.",
+      invalidJsonMessage: "The AI Gateway returned an invalid vault stats response.",
+    });
+    return this.parseVaultStatsResponse(responseText);
+  }
+
+  async deleteVaultIndex(): Promise<VaultDeleteResponsePayload> {
+    const responseText = await this.performJsonRequest({
+      apiBaseUrl: this.getApiBaseUrl(),
+      apiToken: this.getApiToken(),
+      path: `/v1/vault/index?vault_id=${encodeURIComponent(this.getVaultId())}`,
+      method: "DELETE",
+      errorMap: {
+        401: "Token invalide ou expire.",
+        403: "Le token n'a pas le droit vault:admin.",
+        503: "La connaissance du vault n'est pas activee cote serveur.",
+      },
+      unavailableMessage: "AI Gateway inaccessible.",
+      invalidJsonMessage: "The AI Gateway returned an invalid vault delete response.",
+    });
+    return this.parseVaultDeleteResponse(responseText);
+  }
+
+  async indexVaultNote(file: TFile): Promise<VaultIndexNoteResponsePayload | null> {
+    if (!this.settings.ragEnabled) {
+      throw new UserFacingError("La connaissance du vault est desactivee dans les reglages.");
+    }
+    const candidate = await this.buildVaultIndexPayload(file);
+    if (!candidate) {
+      return null;
+    }
+    return this.requestVaultIndexNote(this.getApiBaseUrl(), this.getApiToken(), candidate);
+  }
+
+  async indexCurrentNote(): Promise<void> {
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) {
+      throw new UserFacingError("Ouvre une note avant de l'indexer.");
+    }
+    const result = await this.indexVaultNote(activeFile);
+    if (!result) {
+      new Notice("Note ignoree par les exclusions RAG.");
+      return;
+    }
+    new Notice(`Note ${result.status}: ${result.chunks_indexed} chunks.`);
+  }
+
+  async indexCurrentFolder(): Promise<void> {
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile?.parent) {
+      throw new UserFacingError("Ouvre une note dans le dossier a indexer.");
+    }
+    const files = collectMarkdownFiles(activeFile.parent);
+    const progress = await this.indexVaultFiles(files, "Indexation du dossier");
+    new Notice(`Dossier indexe. Indexed: ${progress.indexed}, skipped: ${progress.skipped}, errors: ${progress.errors}.`, 10000);
+  }
+
+  async indexWholeVault(): Promise<void> {
+    const files = this.app.vault.getMarkdownFiles();
+    const progress = await this.indexVaultFiles(files, "Indexation du vault");
+    new Notice(`Vault indexe. Indexed: ${progress.indexed}, skipped: ${progress.skipped}, errors: ${progress.errors}.`, 10000);
+  }
+
+  async indexVaultFiles(files: TFile[], label: string): Promise<VaultIndexProgress> {
+    this.validateCoreSettings();
+    const progress: VaultIndexProgress = { total: files.length, indexed: 0, skipped: 0, errors: 0 };
+    for (let index = 0; index < files.length; index += 1) {
+      if (index % 10 === 0) {
+        new Notice(`${label}: ${index}/${files.length}`, 1500);
+        await sleep(25);
+      }
+      try {
+        const result = await this.indexVaultNote(files[index]);
+        if (!result || result.status === "skipped") {
+          progress.skipped += 1;
+        } else {
+          progress.indexed += 1;
+        }
+      } catch (error) {
+        progress.errors += 1;
+        console.warn("Note Compagnon vault indexing error", {
+          path: files[index].path,
+          message: error instanceof Error ? error.message : "unknown",
+        });
+      }
+    }
+    return progress;
+  }
+
+  async buildVaultIndexPayload(file: TFile): Promise<VaultIndexNotePayload | null> {
+    if (file.extension !== "md" || this.isPathExcludedFromRag(file.path)) {
+      return null;
+    }
+    const content = await this.app.vault.read(file);
+    if (content.length > this.getRagMaxFileChars()) {
+      return null;
+    }
+    const parsed = parseSimpleFrontmatter(content);
+    if (parsed.frontmatter.ai_index === false) {
+      return null;
+    }
+    const tags = extractTagsFromFrontmatter(parsed.frontmatter);
+    const excludedTags = new Set(this.getRagExcludedTags().map((tag) => tag.toLowerCase()));
+    if (tags.some((tag) => excludedTags.has(tag.toLowerCase().replace(/^#/, "")))) {
+      return null;
+    }
+    const title = typeof parsed.frontmatter.title === "string" && parsed.frontmatter.title.trim()
+      ? parsed.frontmatter.title.trim()
+      : file.basename;
+    return {
+      vault_id: this.getVaultId(),
+      path: file.path,
+      title,
+      content,
+      modified_at: new Date(file.stat.mtime).toISOString(),
+      tags,
+      frontmatter: parsed.frontmatter,
+      metadata: {
+        indexed_by: "note-compagnon",
+      },
+    };
+  }
+
+  isPathExcludedFromRag(path: string): boolean {
+    const normalizedPath = normalizePath(path);
+    return this.getRagExcludedFolders().some((folder) => {
+      const normalizedFolder = normalizePath(folder);
+      return normalizedPath === normalizedFolder || normalizedPath.startsWith(`${normalizedFolder}/`);
+    });
+  }
+
   async askAssistant(message: string, useCurrentNoteContext: boolean): Promise<AssistantChatResponsePayload> {
     this.validateCoreSettings();
     let context = "";
@@ -1333,6 +1613,24 @@ export default class LocalAiPlatformPlugin extends Plugin {
       output_language: this.getAssistantOutputLanguage(),
       model: this.getDefaultModel(),
     });
+  }
+
+  async askDashboardAssistant(message: string, mode: AssistantResponseMode): Promise<{ answerMarkdown: string; sources: VaultSourcePayload[] }> {
+    this.validateCoreSettings();
+    if (mode === "vault") {
+      const response = await this.askVault(message);
+      return {
+        answerMarkdown: cleanGeneratedMarkdown(response.answer_markdown),
+        sources: response.sources,
+      };
+    }
+
+    const useCurrentNoteContext = mode === "current_note";
+    const response = await this.askAssistant(message, useCurrentNoteContext);
+    return {
+      answerMarkdown: cleanGeneratedMarkdown(response.answer_markdown),
+      sources: [],
+    };
   }
 
   async runAssistantOnSelection(editor: Editor, mode: "correct" | "rewrite" | "summarize"): Promise<void> {
@@ -1468,7 +1766,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
     apiBaseUrl: string;
     apiToken: string;
     path: string;
-    method: "GET" | "POST";
+    method: "GET" | "POST" | "DELETE";
     body?: string;
     errorMap: Record<number, string>;
     unavailableMessage: string;
@@ -1735,6 +2033,38 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return parsed;
   }
 
+  parseVaultIndexNoteResponse(responseText: string): VaultIndexNoteResponsePayload {
+    const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid vault indexing response.");
+    if (!isVaultIndexNoteResponsePayload(parsed)) {
+      throw new UserFacingError("The AI Gateway returned an invalid vault indexing payload.");
+    }
+    return parsed;
+  }
+
+  parseVaultAskResponse(responseText: string): VaultAskResponsePayload {
+    const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid vault answer response.");
+    if (!isVaultAskResponsePayload(parsed)) {
+      throw new UserFacingError("The AI Gateway returned an invalid vault answer payload.");
+    }
+    return parsed;
+  }
+
+  parseVaultStatsResponse(responseText: string): VaultStatsResponsePayload {
+    const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid vault stats response.");
+    if (!isVaultStatsResponsePayload(parsed)) {
+      throw new UserFacingError("The AI Gateway returned an invalid vault stats payload.");
+    }
+    return parsed;
+  }
+
+  parseVaultDeleteResponse(responseText: string): VaultDeleteResponsePayload {
+    const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid vault delete response.");
+    if (!isVaultDeleteResponsePayload(parsed)) {
+      throw new UserFacingError("The AI Gateway returned an invalid vault delete payload.");
+    }
+    return parsed;
+  }
+
   parseJson<T>(responseText: string, invalidMessage: string): T {
     try {
       return JSON.parse(responseText) as T;
@@ -1754,7 +2084,9 @@ class NoteCompagnonDashboardView extends ItemView {
   private chatResponseEl: HTMLElement | null = null;
   private chatActionsEl: HTMLElement | null = null;
   private lastAssistantAnswer = "";
-  private chatUseCurrentNoteContext = false;
+  private lastVaultSources: VaultSourcePayload[] = [];
+  private lastVaultStats: VaultStatsResponsePayload | null = null;
+  private assistantResponseMode: AssistantResponseMode = "simple";
 
   constructor(leaf: WorkspaceLeaf, plugin: LocalAiPlatformPlugin) {
     super(leaf);
@@ -1794,6 +2126,24 @@ class NoteCompagnonDashboardView extends ItemView {
     ]);
 
     container.createEl("h3", { text: "Assistant" });
+    const modeSetting = new Setting(container)
+      .setName("Mode de reponse")
+      .setDesc("Choisis explicitement si Note Compagnon utilise seulement la question, la note courante ou l'index du vault.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("simple", "Assistant simple")
+          .addOption("current_note", "Avec la note courante")
+          .addOption("vault", "Avec le vault")
+          .setValue(this.plugin.settings.assistantResponseMode || "simple")
+          .onChange(async (value) => {
+            this.assistantResponseMode = value as AssistantResponseMode;
+            this.plugin.settings.assistantResponseMode = this.assistantResponseMode;
+            await this.plugin.saveSettings();
+          }),
+      );
+    modeSetting.settingEl.style.marginBottom = "6px";
+    this.assistantResponseMode = this.plugin.settings.assistantResponseMode || "simple";
+
     const chatInput = container.createEl("textarea");
     chatInput.placeholder = "Pose une question a Note Compagnon...";
     chatInput.rows = 4;
@@ -1814,20 +2164,6 @@ class NoteCompagnonDashboardView extends ItemView {
     sendButton.addEventListener("click", async () => {
       await this.sendChatMessage(chatInput.value);
     });
-    const contextLabel = chatControls.createEl("label");
-    contextLabel.style.display = "flex";
-    contextLabel.style.alignItems = "center";
-    contextLabel.style.gap = "4px";
-    const contextCheckbox = contextLabel.createEl("input", { type: "checkbox" });
-    contextCheckbox.checked = this.plugin.settings.chatUseCurrentNoteContext;
-    this.chatUseCurrentNoteContext = contextCheckbox.checked;
-    contextCheckbox.addEventListener("change", async () => {
-      this.chatUseCurrentNoteContext = contextCheckbox.checked;
-      this.plugin.settings.chatUseCurrentNoteContext = contextCheckbox.checked;
-      await this.plugin.saveSettings();
-    });
-    contextLabel.createSpan({ text: "Utiliser la note courante comme contexte" });
-
     const answerControls = container.createDiv({ cls: "notre-compagnon-answer-controls" });
     answerControls.style.display = this.lastAssistantAnswer ? "flex" : "none";
     answerControls.style.flexWrap = "wrap";
@@ -1873,6 +2209,29 @@ class NoteCompagnonDashboardView extends ItemView {
       await this.renderTemplateList(container);
     }
 
+    container.createEl("h3", { text: "Connaissance du vault" });
+    new Setting(container)
+      .setName("Resume")
+      .setDesc(`Vault ID: ${this.plugin.getVaultId()} | RAG: ${this.plugin.settings.ragEnabled ? "active" : "desactive"}${this.lastVaultStats ? ` | ${this.lastVaultStats.documents} documents / ${this.lastVaultStats.chunks} chunks` : ""}`);
+    this.addActionGrid(container, [[this.plugin.settings.dashboardVaultExpanded ? "Masquer" : "Afficher", async () => {
+      this.plugin.settings.dashboardVaultExpanded = !this.plugin.settings.dashboardVaultExpanded;
+      await this.plugin.saveSettings();
+      await this.render();
+    }]]);
+    if (this.plugin.settings.dashboardVaultExpanded) {
+      this.addActionGrid(container, [
+        ["Indexer note", async () => this.plugin.indexCurrentNote()],
+        ["Indexer dossier", async () => this.plugin.indexCurrentFolder()],
+        ["Indexer vault", async () => this.plugin.indexWholeVault()],
+        ["Statistiques", async () => {
+          this.lastVaultStats = await this.plugin.getVaultStats();
+          new Notice(`Vault: ${this.lastVaultStats.documents} documents, ${this.lastVaultStats.chunks} chunks.`);
+          await this.render();
+        }],
+        ["Supprimer index", async () => this.confirmAndDeleteVaultIndex()],
+      ]);
+    }
+
     container.createEl("h3", { text: "Etat" });
     const status = this.plugin.getConfigurationStatus();
     this.addActionGrid(container, [["Tester", async () => this.plugin.testConnection()]]);
@@ -1887,6 +2246,8 @@ class NoteCompagnonDashboardView extends ItemView {
       new Setting(container).setName("Modele actif").setDesc(this.plugin.settings.defaultModel || "Not configured");
       new Setting(container).setName("Transcription").setDesc(formatTranscriptionLanguageLabel(this.plugin.getTranscriptionLanguage()));
       new Setting(container).setName("Sortie").setDesc(formatOutputLanguageLabel(this.plugin.getOutputLanguage()));
+      new Setting(container).setName("Vault ID").setDesc(this.plugin.getVaultId());
+      new Setting(container).setName("Connaissance du vault").setDesc(this.plugin.settings.ragEnabled ? "activee" : "desactivee");
       new Setting(container)
         .setName("Mode audio")
         .setDesc(formatRecordingSourceLabel(this.plugin.getRecordingSource(), this.plugin.getSelectedMicrophoneInputLabel(), this.plugin.getSelectedComputerAudioInputLabel()));
@@ -1920,8 +2281,9 @@ class NoteCompagnonDashboardView extends ItemView {
         throw new UserFacingError("Ecris un message avant d'envoyer.");
       }
       new Notice("Note Compagnon reflechit...");
-      const response = await this.plugin.askAssistant(message, this.chatUseCurrentNoteContext);
-      this.lastAssistantAnswer = cleanGeneratedMarkdown(response.answer_markdown);
+      const response = await this.plugin.askDashboardAssistant(message, this.assistantResponseMode);
+      this.lastAssistantAnswer = response.answerMarkdown;
+      this.lastVaultSources = response.sources;
       await this.renderAssistantAnswer();
       if (this.chatActionsEl) {
         this.chatActionsEl.style.display = "flex";
@@ -1953,7 +2315,47 @@ class NoteCompagnonDashboardView extends ItemView {
     }
     this.chatResponseEl.style.display = "block";
     await MarkdownRenderer.renderMarkdown(this.lastAssistantAnswer, this.chatResponseEl, "", this);
+    if (this.lastVaultSources.length > 0) {
+      this.renderVaultSources(this.chatResponseEl, this.lastVaultSources);
+    } else if (this.assistantResponseMode === "vault") {
+      const empty = this.chatResponseEl.createEl("p");
+      empty.textContent = "Je n'ai pas trouve assez d'informations dans l'index du vault. Essaie d'indexer le vault ou de reformuler la question.";
+    }
     styleAssistantAnswer(this.chatResponseEl);
+  }
+
+  private renderVaultSources(container: HTMLElement, sources: VaultSourcePayload[]): void {
+    const details = container.createEl("details");
+    details.open = true;
+    details.createEl("summary", { text: "Sources utilisees" });
+    const list = details.createEl("ul");
+    for (const source of sources) {
+      const item = list.createEl("li");
+      const file = this.app.vault.getAbstractFileByPath(source.path);
+      const label = `${source.title || source.path}${source.heading_path ? ` - ${source.heading_path}` : ""}`;
+      if (file instanceof TFile) {
+        const link = item.createEl("a", { text: label });
+        link.href = "#";
+        link.addEventListener("click", async (event) => {
+          event.preventDefault();
+          await this.app.workspace.getLeaf(true).openFile(file);
+        });
+      } else {
+        item.createSpan({ text: label });
+      }
+      item.createSpan({ text: ` (score ${source.score.toFixed(2)}, chunk ${source.chunk_index})` });
+    }
+  }
+
+  private async confirmAndDeleteVaultIndex(): Promise<void> {
+    const confirmed = window.confirm(`Supprimer l'index RAG du vault '${this.plugin.getVaultId()}' ? Aucune note Obsidian ne sera supprimee.`);
+    if (!confirmed) {
+      return;
+    }
+    const result = await this.plugin.deleteVaultIndex();
+    this.lastVaultStats = null;
+    new Notice(`Index supprime: ${result.deleted_documents} documents, ${result.deleted_chunks} chunks.`);
+    await this.render();
   }
 
   private async runSelectionAction(mode: "correct" | "rewrite" | "summarize"): Promise<void> {
@@ -2131,6 +2533,70 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.preferredTemplateLanguage)
           .onChange(async (value) => {
             this.plugin.settings.preferredTemplateLanguage = value as PluginSettings["preferredTemplateLanguage"];
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    containerEl.createEl("h3", { text: "Connaissance du vault" });
+    new Setting(containerEl)
+      .setName("Activer la connaissance du vault")
+      .setDesc("Active les boutons d'indexation et le mode Assistant Avec le vault. Aucun index automatique n'est lance.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.ragEnabled).onChange(async (value) => {
+          this.plugin.settings.ragEnabled = value;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Identifiant du vault")
+      .setDesc("Envoye au backend RAG pour isoler l'index.")
+      .addText((text) =>
+        text
+          .setPlaceholder("default")
+          .setValue(this.plugin.settings.vaultId)
+          .onChange(async (value) => {
+            this.plugin.settings.vaultId = value.trim() || "default";
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Dossiers exclus de l'index")
+      .setDesc("Liste separee par virgules. Les notes dans ces dossiers ne sont jamais envoyees au RAG.")
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.ragExcludedFolders)
+          .setValue(this.plugin.settings.ragExcludedFolders)
+          .onChange(async (value) => {
+            this.plugin.settings.ragExcludedFolders = value.trim() || DEFAULT_SETTINGS.ragExcludedFolders;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Tags exclus de l'index")
+      .setDesc("Liste separee par virgules. Une note avec un de ces tags est ignoree.")
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.ragExcludedTags)
+          .setValue(this.plugin.settings.ragExcludedTags)
+          .onChange(async (value) => {
+            this.plugin.settings.ragExcludedTags = value.trim() || DEFAULT_SETTINGS.ragExcludedTags;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Taille maximale d'une note a indexer")
+      .setDesc("Nombre maximal de caracteres par note envoyee a /v1/vault/index-note.")
+      .addText((text) =>
+        text
+          .setPlaceholder(String(DEFAULT_SETTINGS.ragMaxFileChars))
+          .setValue(String(this.plugin.settings.ragMaxFileChars))
+          .onChange(async (value) => {
+            const parsed = Number(value);
+            this.plugin.settings.ragMaxFileChars = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SETTINGS.ragMaxFileChars;
             await this.plugin.saveSettings();
           }),
       );
@@ -2625,6 +3091,58 @@ function isAssistantChatResponsePayload(value: unknown): value is AssistantChatR
   );
 }
 
+function isVaultIndexNoteResponsePayload(value: unknown): value is VaultIndexNoteResponsePayload {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<VaultIndexNoteResponsePayload>;
+  return (
+    (candidate.status === "indexed" || candidate.status === "skipped") &&
+    typeof candidate.document_id === "string" &&
+    typeof candidate.path === "string" &&
+    typeof candidate.chunks_indexed === "number" &&
+    typeof candidate.content_hash === "string"
+  );
+}
+
+function isVaultSourcePayload(value: unknown): value is VaultSourcePayload {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<VaultSourcePayload>;
+  return (
+    typeof candidate.path === "string" &&
+    (typeof candidate.title === "string" || candidate.title === null) &&
+    (typeof candidate.heading_path === "string" || candidate.heading_path === null) &&
+    typeof candidate.chunk_index === "number" &&
+    typeof candidate.score === "number"
+  );
+}
+
+function isVaultAskResponsePayload(value: unknown): value is VaultAskResponsePayload {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<VaultAskResponsePayload>;
+  return (
+    typeof candidate.model === "string" &&
+    typeof candidate.answer_markdown === "string" &&
+    Array.isArray(candidate.sources) &&
+    candidate.sources.every(isVaultSourcePayload)
+  );
+}
+
+function isVaultStatsResponsePayload(value: unknown): value is VaultStatsResponsePayload {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<VaultStatsResponsePayload>;
+  return (
+    typeof candidate.vault_id === "string" &&
+    typeof candidate.documents === "number" &&
+    typeof candidate.chunks === "number" &&
+    (typeof candidate.last_indexed_at === "string" || candidate.last_indexed_at === null)
+  );
+}
+
+function isVaultDeleteResponsePayload(value: unknown): value is VaultDeleteResponsePayload {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<VaultDeleteResponsePayload>;
+  return typeof candidate.vault_id === "string" && typeof candidate.deleted_documents === "number" && typeof candidate.deleted_chunks === "number";
+}
+
 function collectMarkdownFiles(file: TAbstractFile): TFile[] {
   if (file instanceof TFile) {
     return file.extension === "md" ? [file] : [];
@@ -2734,6 +3252,92 @@ function parseTemplateContent(content: string): {
   }
 
   return { metadata, body };
+}
+
+function parseSimpleFrontmatter(content: string): { frontmatter: Record<string, unknown>; body: string } {
+  const normalized = content.replace(/^\uFEFF/, "");
+  if (!normalized.startsWith("---\n")) {
+    return { frontmatter: {}, body: normalized };
+  }
+  const closingIndex = normalized.indexOf("\n---", 4);
+  if (closingIndex < 0) {
+    return { frontmatter: {}, body: normalized };
+  }
+  const rawFrontmatter = normalized.slice(4, closingIndex);
+  const frontmatter: Record<string, unknown> = {};
+  let currentListKey: string | null = null;
+  try {
+    for (const line of rawFrontmatter.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) {
+        continue;
+      }
+      if (currentListKey && trimmed.startsWith("- ")) {
+        const list = frontmatter[currentListKey];
+        if (Array.isArray(list)) {
+          list.push(parseFrontmatterScalar(trimmed.slice(2).trim()));
+        }
+        continue;
+      }
+      currentListKey = null;
+      const separatorIndex = line.indexOf(":");
+      if (separatorIndex < 0) {
+        continue;
+      }
+      const key = line.slice(0, separatorIndex).trim();
+      const rawValue = line.slice(separatorIndex + 1).trim();
+      if (!key) {
+        continue;
+      }
+      if (!rawValue) {
+        frontmatter[key] = [];
+        currentListKey = key;
+      } else {
+        frontmatter[key] = parseFrontmatterScalar(rawValue);
+      }
+    }
+  } catch {
+    return { frontmatter: {}, body: normalized };
+  }
+  return {
+    frontmatter,
+    body: normalized.slice(closingIndex + 4).replace(/^\r?\n/, ""),
+  };
+}
+
+function parseFrontmatterScalar(value: string): unknown {
+  const cleaned = value.trim().replace(/^["']|["']$/g, "");
+  if (cleaned === "false") return false;
+  if (cleaned === "true") return true;
+  if (cleaned.startsWith("[") && cleaned.endsWith("]")) {
+    return cleaned
+      .slice(1, -1)
+      .split(",")
+      .map((item) => item.trim().replace(/^["']|["']$/g, ""))
+      .filter(Boolean);
+  }
+  return cleaned;
+}
+
+function extractTagsFromFrontmatter(frontmatter: Record<string, unknown>): string[] {
+  const rawTags = frontmatter.tags ?? frontmatter.tag;
+  if (Array.isArray(rawTags)) {
+    return rawTags.filter((tag): tag is string => typeof tag === "string").map((tag) => tag.replace(/^#/, ""));
+  }
+  if (typeof rawTags === "string") {
+    return rawTags
+      .split(/[,\s]+/)
+      .map((tag) => tag.trim().replace(/^#/, ""))
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function parseCommaSeparatedList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function filterRecommendedTemplates(installSet: TemplateInstallSet): Array<{ fileName: string; content: string; language: "fr" | "en"; minimal: boolean }> {

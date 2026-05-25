@@ -35,6 +35,11 @@ Configure these settings in Obsidian:
 - `Transcription language`
 - `Output language`
 - `Preferred template language`
+- `Activer la connaissance du vault`
+- `Identifiant du vault`
+- `Dossiers exclus de l'index`
+- `Tags exclus de l'index`
+- `Taille maximale d'une note a indexer`
 - `Mode d'enregistrement`
 - `Microphone`
 - `Son ordinateur`
@@ -46,6 +51,18 @@ Required API scopes:
 - `notes:summarize` for note summaries
 - `audio:transcribe` for audio upload jobs
 - `meetings:generate` for meeting minutes from completed audio jobs
+- `vault:index` for indexing local notes into the RAG backend
+- `vault:search` for vault stats/search features
+- `vault:ask` for asking questions to the indexed vault
+- `vault:admin` for deleting the vault index
+
+Recommended full token command from the repository root:
+
+```powershell
+.\scripts\prod\create-token-full.ps1 -Mode gpu -Name "note-compagnon-full"
+```
+
+The token is shown once only. If a token lacks a vault scope, Note Compagnon shows a `403` error such as missing `vault:index`, `vault:ask`, or `vault:admin`.
 
 ## Dashboard
 
@@ -59,6 +76,7 @@ The dashboard is an action page with compact sections:
 
 - `Reunion`: start recording, stop and generate minutes, generate from an audio file, summarize the current note, and open the useful folders
 - `Assistant`: chat with Note Compagnon, then insert or copy a real Markdown-rendered answer
+- `Connaissance du vault`: explicit RAG indexing, stats, deletion, and vault question support
 - `Templates`: install/open templates, with detailed template metadata hidden by default
 - `Etat`: backend status and test button, with details hidden by default
 
@@ -66,14 +84,58 @@ The `Reunion` section keeps these daily actions visible: `Demarrer reunion`, `Ar
 
 ## Assistant
 
-The dashboard chat calls `POST /v1/assistant/chat`. By default it sends only the question typed in the textarea: no current note, no template, and no vault content is sent automatically.
+The dashboard has an explicit `Mode de reponse` selector:
 
-Enable `Utiliser la note courante comme contexte` only when you explicitly want the active note to be used as reference context. If no active note exists, the plugin sends the question without context and shows a short notice.
+1. `Assistant simple`
+   - calls `POST /v1/assistant/chat`
+   - sends only the question typed in the textarea
+   - sends no current note, no template, and no vault context
+2. `Avec la note courante`
+   - calls `POST /v1/assistant/chat`
+   - sends only the active note as `context`
+   - does not use RAG
+3. `Avec le vault`
+   - calls `POST /v1/vault/ask`
+   - uses the RAG index and displays sources
+   - does not send the full current note
 
 For chat, `Output language = same_as_meeting` maps to `same_as_input`, so a French question should receive a French answer and an English question should receive an English answer unless you explicitly force French or English.
 Assistant answers are rendered with Obsidian Markdown in the dashboard, so headings, lists, paragraphs, and code blocks should remain readable. The `Inserer` and `Copier` buttons use the original Markdown text.
 
 The dashboard does not expose selected-text actions because clicking outside the editor can clear the active selection.
+
+## Connaissance Du Vault
+
+The RAG workflow is explicit. Note Compagnon never searches the vault implicitly from the simple assistant mode.
+
+Dashboard actions:
+
+- `Indexer note`: indexes the active Markdown note
+- `Indexer dossier`: indexes Markdown notes in the active note's folder
+- `Indexer vault`: indexes all admissible Markdown notes in the vault
+- `Statistiques`: calls `GET /v1/vault/stats`
+- `Supprimer index`: asks for confirmation, then calls `DELETE /v1/vault/index`
+
+Exclusions are applied before any note is sent to the gateway:
+
+- non-Markdown files are ignored
+- folders listed in `Dossiers exclus de l'index` are ignored
+- notes with frontmatter `ai_index: false` are ignored
+- notes with excluded tags are ignored
+- notes larger than `Taille maximale d'une note a indexer` are ignored
+- attachments and binary files are never indexed
+
+Indexed payloads include the note path, title, Markdown content, frontmatter when it can be parsed simply, tags, and `modified_at`. If frontmatter is invalid, Note Compagnon keeps indexing with empty frontmatter rather than blocking the workflow.
+
+Security model:
+
+- the backend does not read CouchDB or LiveSync directly
+- LiveSync E2EE remains respected because only the local Obsidian plugin sees decrypted notes
+- only notes explicitly sent by the user-triggered indexing actions are stored in the RAG index
+- do not index private folders or notes; use excluded folders, excluded tags, or `ai_index: false`
+- deleting the RAG index does not delete any Obsidian note
+
+When using `Avec le vault`, Note Compagnon renders the answer as Markdown and shows sources. If a source path exists locally, clicking it opens the note. If no source is returned, the dashboard suggests indexing the vault or reformulating the question.
 
 ## Selected Text Actions
 
@@ -231,20 +293,29 @@ The final note should contain the polished minutes only. It should not include t
 8. Verify the dashboard is compact, complete, and has no Teams/test section.
 9. Verify the `Reunion` section contains `Demarrer reunion`, `Arreter + CR`, `Depuis audio`, `Resumer note`, `Ouvrir reunions`, and `Ouvrir comptes rendus`.
 10. Verify the `Reunion` section does not contain `Ouvrir templates` or `Ouvrir enregistrements`.
-11. Ask a simple chat question with context unchecked and verify the active note does not influence the answer.
-12. Ask a simple chat question with context checked and verify the active note can be used.
-13. Verify French chat answers French and English chat answers English when output language is not forced.
-14. Verify an assistant answer with headings, lists, and paragraphs renders as readable Markdown.
-15. Verify assistant `Inserer` / `Copier` appear only after a real answer.
-16. Verify detailed templates and status blocks are collapsible.
-17. Select `Microphone` and `Son ordinateur`, then run `Tester le micro` and `Tester le son ordinateur`.
-18. Record with `Micro seul`.
-19. Record with `Son ordinateur seul` using `Mixage stereo` / `Stereo Mix`.
-20. Record with `Micro + son ordinateur`: speak into the microphone and play computer audio, then verify the saved file contains both.
-21. Verify `Micro + son ordinateur` does not ask for screen/window selection.
-22. Try `Capture systeme experimentale`: if Obsidian/Electron provides no audio track, it fails clearly without creating a silent recording.
-23. Verify `recording_source_requested`, `recording_source_used`, `microphone_input_device_label`, and `computer_audio_input_device_label` are written in the meeting note.
-24. Generate an AI Summary and verify there is no global Markdown code block, no raw transcript, and no internal prompt/source labels.
+11. Ask a simple chat question with `Assistant simple` and verify the active note does not influence the answer.
+12. Ask with `Assistant simple` and verify `/v1/vault/ask` is not used.
+13. Ask with `Avec la note courante` and verify only the active note is used.
+14. Ask with `Avec le vault` and verify sources are displayed.
+15. Index the current note.
+16. Index the current folder.
+17. Index the whole vault and verify exclusions are respected.
+18. Open vault stats and verify documents/chunks are shown.
+19. Delete the vault index and verify confirmation is required.
+20. Verify a token without `vault:index` shows a clear indexing error.
+21. Verify a token without `vault:ask` shows a clear vault question error.
+22. Verify French chat answers French and English chat answers English when output language is not forced.
+23. Verify an assistant answer with headings, lists, and paragraphs renders as readable Markdown.
+24. Verify assistant `Inserer` / `Copier` appear only after a real answer.
+25. Verify detailed templates, vault knowledge, and status blocks are collapsible.
+26. Select `Microphone` and `Son ordinateur`, then run `Tester le micro` and `Tester le son ordinateur`.
+27. Record with `Micro seul`.
+28. Record with `Son ordinateur seul` using `Mixage stereo` / `Stereo Mix`.
+29. Record with `Micro + son ordinateur`: speak into the microphone and play computer audio, then verify the saved file contains both.
+30. Verify `Micro + son ordinateur` does not ask for screen/window selection.
+31. Try `Capture systeme experimentale`: if Obsidian/Electron provides no audio track, it fails clearly without creating a silent recording.
+32. Verify `recording_source_requested`, `recording_source_used`, `microphone_input_device_label`, and `computer_audio_input_device_label` are written in the meeting note.
+33. Generate an AI Summary and verify there is no global Markdown code block, no raw transcript, and no internal prompt/source labels.
 
 ## Privacy Notes
 
