@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.database import get_session_factory
 from app.main import app, get_embedding_client, get_llm_client
-from app.models import VaultChunk
+from app.models import VaultChunk, VaultDocument
 from app.services.ollama_client import OllamaChatResult, OllamaUnavailableError
 from app.token_repository import create_api_token
 
@@ -167,6 +167,21 @@ def test_ask_builds_rag_prompt_with_sources_and_context_limit(client: TestClient
     get_settings.cache_clear()
 
 
+def test_ask_debug_returns_safe_metadata_without_note_content(client: TestClient) -> None:
+    app.dependency_overrides[get_embedding_client] = lambda: FakeEmbeddingClient()
+    app.dependency_overrides[get_llm_client] = lambda: FakeVaultLlmClient()
+    index_token = create_token(["vault:index"], user_id="debug-user")
+    ask_token = create_token(["vault:ask"], user_id="debug-user")
+    client.post("/v1/vault/index-note", headers=bearer(index_token), json=index_payload("# RAG\n\nSecret-ish CouchDB operational details."))
+
+    response = client.post("/v1/vault/ask", headers=bearer(ask_token), json={"vault_id": "default", "question": "CouchDB ?", "model": "qwen2.5:14b", "debug": True})
+    assert response.status_code == 200
+    debug_info = response.json()["debug_info"]
+    assert debug_info["selected_sources_count"] >= 1
+    assert debug_info["selected_paths"] == ["Projects/RAG.md"]
+    assert "Secret-ish" not in str(debug_info)
+
+
 def test_ask_with_no_relevant_sources_returns_insufficient_information(client: TestClient, monkeypatch) -> None:
     monkeypatch.setenv("RAG_MIN_SCORE", "0.99")
     from app.config import get_settings
@@ -181,6 +196,25 @@ def test_ask_with_no_relevant_sources_returns_insufficient_information(client: T
     assert response.status_code == 200
     assert "pas assez d'informations" in response.json()["answer_markdown"]
     get_settings.cache_clear()
+
+
+def test_delete_document_requires_vault_index_and_removes_only_path(client: TestClient) -> None:
+    app.dependency_overrides[get_embedding_client] = lambda: FakeEmbeddingClient()
+    index_token = create_token(["vault:index"], user_id="delete-user")
+    search_token = create_token(["vault:search"], user_id="delete-user")
+    client.post("/v1/vault/index-note", headers=bearer(index_token), json=index_payload())
+
+    forbidden = client.delete("/v1/vault/document?vault_id=default&path=Projects%2FRAG.md", headers=bearer(search_token))
+    assert forbidden.status_code == 403
+
+    deleted = client.delete("/v1/vault/document?vault_id=default&path=Projects%2FRAG.md", headers=bearer(index_token))
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted_documents"] == 1
+    assert deleted.json()["deleted_chunks"] >= 1
+
+    stats = client.get("/v1/vault/stats?vault_id=default", headers=bearer(search_token))
+    assert stats.status_code == 200
+    assert stats.json()["documents"] == 0
 
 
 def test_stats_and_delete_index(client: TestClient) -> None:
@@ -201,6 +235,69 @@ def test_stats_and_delete_index(client: TestClient) -> None:
     deleted = client.delete("/v1/vault/index?vault_id=default", headers=bearer(admin_token))
     assert deleted.status_code == 200
     assert deleted.json()["deleted_documents"] == 1
+
+
+def test_workspace_id_shares_rag_index_across_tokens(client: TestClient) -> None:
+    app.dependency_overrides[get_embedding_client] = lambda: FakeEmbeddingClient()
+    index_token = create_token(["vault:index"], user_id="workspace-user-a")
+    search_token = create_token(["vault:search"], user_id="workspace-user-b")
+    payload = {**index_payload(), "workspace_id": "shared-workspace"}
+    client.post("/v1/vault/index-note", headers=bearer(index_token), json=payload)
+
+    search = client.post("/v1/vault/search", headers=bearer(search_token), json={"vault_id": "default", "workspace_id": "shared-workspace", "query": "CouchDB"})
+    assert search.status_code == 200
+    assert search.json()["results"][0]["path"] == "Projects/RAG.md"
+
+
+def test_workspace_id_falls_back_to_user_id(client: TestClient) -> None:
+    app.dependency_overrides[get_embedding_client] = lambda: FakeEmbeddingClient()
+    index_token = create_token(["vault:index"], user_id="fallback-user-a")
+    search_token = create_token(["vault:search"], user_id="fallback-user-b")
+    client.post("/v1/vault/index-note", headers=bearer(index_token), json=index_payload())
+
+    search = client.post("/v1/vault/search", headers=bearer(search_token), json={"vault_id": "default", "query": "CouchDB"})
+    assert search.status_code == 200
+    assert search.json()["results"] == []
+
+
+def test_delete_index_without_all_users_keeps_other_workspace(client: TestClient) -> None:
+    app.dependency_overrides[get_embedding_client] = lambda: FakeEmbeddingClient()
+    token_a = create_token(["vault:index", "vault:admin", "vault:search"], user_id="purge-a")
+    token_b = create_token(["vault:index", "vault:search"], user_id="purge-b")
+    client.post("/v1/vault/index-note", headers=bearer(token_a), json={**index_payload(), "workspace_id": "workspace-a"})
+    client.post("/v1/vault/index-note", headers=bearer(token_b), json={**index_payload(), "workspace_id": "workspace-b", "path": "Projects/Other.md"})
+
+    deleted = client.delete("/v1/vault/index?vault_id=default&workspace_id=workspace-a", headers=bearer(token_a))
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted_documents"] == 1
+
+    stats_b = client.get("/v1/vault/stats?vault_id=default&workspace_id=workspace-b", headers=bearer(token_b))
+    assert stats_b.status_code == 200
+    assert stats_b.json()["documents"] == 1
+
+
+def test_delete_index_all_users_removes_all_workspaces_for_vault_only(client: TestClient) -> None:
+    app.dependency_overrides[get_embedding_client] = lambda: FakeEmbeddingClient()
+    admin_token = create_token(["vault:index", "vault:admin", "vault:search"], user_id="all-admin")
+    other_token = create_token(["vault:index", "vault:search"], user_id="all-other")
+    client.post("/v1/vault/index-note", headers=bearer(admin_token), json={**index_payload(), "workspace_id": "workspace-a"})
+    client.post("/v1/vault/index-note", headers=bearer(other_token), json={**index_payload(), "workspace_id": "workspace-b", "path": "Projects/Other.md"})
+    client.post("/v1/vault/index-note", headers=bearer(other_token), json={**index_payload(), "vault_id": "other-vault", "workspace_id": "workspace-b", "path": "Projects/OtherVault.md"})
+
+    deleted = client.delete("/v1/vault/index?vault_id=default&all_users=true", headers=bearer(admin_token))
+    assert deleted.status_code == 200
+    assert deleted.json()["all_users"] is True
+    assert deleted.json()["deleted_documents"] == 2
+
+    with get_session_factory()() as session:
+        remaining = session.query(VaultDocument).filter(VaultDocument.vault_id == "other-vault").count()
+        assert remaining == 1
+
+
+def test_delete_index_all_users_requires_vault_admin(client: TestClient) -> None:
+    token = create_token(["vault:index"], user_id="not-admin")
+    response = client.delete("/v1/vault/index?vault_id=default&all_users=true", headers=bearer(token))
+    assert response.status_code == 403
 
 
 def test_embedding_unavailable_returns_controlled_error(client: TestClient) -> None:

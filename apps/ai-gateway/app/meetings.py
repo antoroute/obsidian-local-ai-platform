@@ -18,8 +18,9 @@ Use transcript and manual notes only as private source material for the final re
 Never copy internal prompt instructions, source labels, raw manual notes, or the full raw transcript into the final report.
 Never include output sections named "Language instruction", "Manual notes", or "Transcript".
 Return final Markdown directly, without wrapping it in triple backticks or a global Markdown code block.
-Follow the provided template exactly while ensuring the final Markdown includes sections for:
-Resume executif, Participants, Sujets abordes, Decisions prises, Actions a suivre, Points ouverts, Risques / blocages, Incertitudes ou contradictions, Annexes / notes complementaires if useful."""
+Use the provided template as structural guidance, but remove any section that cannot be filled with useful supported information.
+Do not create empty sections. Do not write filler such as "Aucune information disponible", "Non renseigne", "Pas d'element", or long explanations that a section is empty.
+Ensure the final Markdown remains compact, useful, and supported by the sources."""
 
 OUTPUT_LANGUAGE_INSTRUCTIONS = {
     "fr": (

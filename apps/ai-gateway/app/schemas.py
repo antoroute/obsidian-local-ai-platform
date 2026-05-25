@@ -134,6 +134,7 @@ class AssistantChatResponse(BaseModel):
 
 class VaultIndexNoteRequest(BaseModel):
     vault_id: str = Field(default="default", min_length=1)
+    workspace_id: str | None = Field(default=None, min_length=1)
     path: str = Field(min_length=1)
     title: str | None = None
     content: str = Field(min_length=1)
@@ -153,6 +154,7 @@ class VaultIndexNoteResponse(BaseModel):
 
 class VaultSearchRequest(BaseModel):
     vault_id: str = Field(default="default", min_length=1)
+    workspace_id: str | None = Field(default=None, min_length=1)
     query: str = Field(min_length=1)
     top_k: int | None = None
     path_prefix: str | None = None
@@ -175,12 +177,14 @@ class VaultSearchResponse(BaseModel):
 
 class VaultAskRequest(BaseModel):
     vault_id: str = Field(default="default", min_length=1)
+    workspace_id: str | None = Field(default=None, min_length=1)
     question: str = Field(min_length=1)
     model: str | None = None
     top_k: int | None = None
     path_prefix: str | None = None
     tags: list[str] = Field(default_factory=list)
     answer_language: VaultAnswerLanguage = "same_as_input"
+    debug: bool = False
 
 
 class VaultSourceResponse(BaseModel):
@@ -195,10 +199,12 @@ class VaultAskResponse(BaseModel):
     model: str
     answer_markdown: str
     sources: list[VaultSourceResponse]
+    debug_info: dict[str, object] | None = None
 
 
 class VaultStatsResponse(BaseModel):
     vault_id: str
+    workspace_id: str
     documents: int
     chunks: int
     last_indexed_at: str | None
@@ -206,5 +212,7 @@ class VaultStatsResponse(BaseModel):
 
 class VaultDeleteResponse(BaseModel):
     vault_id: str
+    workspace_id: str | None = None
+    all_users: bool = False
     deleted_documents: int
     deleted_chunks: int

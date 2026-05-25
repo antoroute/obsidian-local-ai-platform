@@ -46,10 +46,14 @@ class Job(Base):
 
 class VaultDocument(Base):
     __tablename__ = "vault_documents"
-    __table_args__ = (UniqueConstraint("user_id", "vault_id", "path", name="uq_vault_document_user_vault_path"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "vault_id", "path", name="uq_vault_document_user_vault_path"),
+        UniqueConstraint("workspace_id", "vault_id", "path", name="uq_vault_document_workspace_vault_path"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    workspace_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     vault_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     path: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -71,6 +75,7 @@ class VaultChunk(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     document_id: Mapped[str] = mapped_column(String(36), ForeignKey("vault_documents.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    workspace_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     vault_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     path: Mapped[str] = mapped_column(Text, nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)

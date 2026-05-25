@@ -79,18 +79,24 @@ Production scripts may invoke the token CLI, but they must not write the raw tok
 - `POST /v1/vault/index-note` requires `vault:index`
 - `POST /v1/vault/search` requires `vault:search`
 - `POST /v1/vault/ask` requires `vault:ask`
+- `DELETE /v1/vault/document` requires `vault:index` and deletes only the indexed backend copy for the authenticated user
 - `DELETE /v1/vault/index` requires `vault:admin`
 - `GET /v1/vault/stats` requires `vault:search` or `vault:admin`
 - the backend must not read CouchDB or LiveSync directly; LiveSync E2EE means decrypted note content is available only inside Obsidian
 - indexing is expected to come from the Obsidian plugin, which can see decrypted notes locally
-- RAG data is isolated by `user_id` and `vault_id`
+- automatic indexing, if enabled, still runs only from the Obsidian plugin and only while Obsidian is open
+- RAG data is isolated by `workspace_id` and `vault_id`; when no workspace is provided, the backend falls back to the token `user_id`
+- for personal deployments, use a stable `RAG_WORKSPACE_ID` / plugin Workspace RAG value so regenerated tokens share the same vault index
+- multiplying tokens without a shared workspace can create separate historical RAG spaces
 - excluded directories and tags should be configured with `RAG_INDEX_EXCLUDED_DIRS` and `RAG_INDEX_EXCLUDED_TAGS`
 - private notes should be tagged with an excluded tag such as `noai` or `private`
 - search responses return bounded snippets, not full notes
+- `debug=true` on `/v1/vault/ask` returns only safe metadata such as counts, scores, and paths, never complete note content
 - `/v1/vault/ask` must answer only from retrieved sources and must return the sources used
 - note contents, embeddings input text, and full retrieved context must not be logged
 - `RAG_ENABLED=false` disables RAG endpoints cleanly
 - `vault:admin` tokens can delete the user's vault index and should be issued sparingly
+- `DELETE /v1/vault/index?all_users=true` requires `vault:admin` and purges the selected vault index across every workspace/user; it must be used only for cleanup and never deletes Obsidian notes
 - PostgreSQL + pgvector is the production RAG backend; this does not change the token, user isolation, or logging rules
 - indexed note chunks and embeddings are stored in PostgreSQL, so do not index notes that should remain outside the AI index
 - after deleting an index with `vault:admin`, the plugin must reindex notes before vault questions can use them again

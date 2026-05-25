@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +19,7 @@ from app.schemas import VaultAskRequest, VaultIndexNoteRequest, VaultSearchReque
 from app.security import utc_now
 from app.vault_chunking import sha256_text, split_markdown_chunks
 
+logger = logging.getLogger(__name__)
 
 RAG_SYSTEM_PROMPT = """You are Note Compagnon in vault RAG mode.
 Answer only from the provided retrieved sources.
@@ -39,6 +42,8 @@ class SearchHit:
     chunk: VaultChunk
     document: VaultDocument
     score: float
+    vector_score: float = 0.0
+    keyword_bonus: float = 0.0
 
 
 def ensure_rag_enabled(settings: Settings) -> None:
@@ -69,6 +74,7 @@ async def index_note(
     session: Session,
     *,
     user_id: str,
+    workspace_id: str,
     payload: VaultIndexNoteRequest,
     settings: Settings,
     embed_text,
@@ -76,7 +82,7 @@ async def index_note(
     ensure_rag_enabled(settings)
     ensure_vector_backend_allowed(session, settings)
     content_hash = sha256_text(payload.content)
-    existing = find_document(session, user_id=user_id, vault_id=payload.vault_id, path=payload.path)
+    existing = find_document(session, workspace_id=workspace_id, vault_id=payload.vault_id, path=payload.path)
     if existing and existing.content_hash == content_hash and existing.deleted_at is None:
         existing_chunk_count = count_document_chunks(session, existing.id)
         if existing_chunk_count > 0:
@@ -86,6 +92,7 @@ async def index_note(
     document = existing or VaultDocument(
         id=str(uuid.uuid4()),
         user_id=user_id,
+        workspace_id=workspace_id,
         vault_id=payload.vault_id,
         path=payload.path,
         content_hash=content_hash,
@@ -117,6 +124,7 @@ async def index_note(
                 id=str(uuid.uuid4()),
                 document_id=document.id,
                 user_id=user_id,
+                workspace_id=workspace_id,
                 vault_id=payload.vault_id,
                 path=payload.path,
                 chunk_index=chunk.chunk_index,
@@ -138,6 +146,7 @@ async def search_vault(
     session: Session,
     *,
     user_id: str,
+    workspace_id: str,
     payload: VaultSearchRequest,
     settings: Settings,
     embed_text,
@@ -150,6 +159,7 @@ async def search_vault(
         return search_vault_pgvector(
             session,
             user_id=user_id,
+            workspace_id=workspace_id,
             payload=payload,
             query_embedding=query_embedding,
             top_k=top_k,
@@ -158,7 +168,7 @@ async def search_vault(
     statement = (
         select(VaultChunk, VaultDocument)
         .join(VaultDocument, VaultDocument.id == VaultChunk.document_id)
-        .where(VaultChunk.user_id == user_id, VaultChunk.vault_id == payload.vault_id, VaultDocument.deleted_at.is_(None))
+        .where(VaultChunk.workspace_id == workspace_id, VaultChunk.vault_id == payload.vault_id, VaultDocument.deleted_at.is_(None))
     )
     if payload.path_prefix:
         statement = statement.where(VaultChunk.path.startswith(payload.path_prefix))
@@ -168,9 +178,10 @@ async def search_vault(
     for chunk, document in rows:
         if tag_filter and not tag_filter.issubset(set(load_json_list(document.tags_json))):
             continue
-        score = cosine_similarity(query_embedding, load_embedding(chunk.embedding))
+        vector_score = cosine_similarity(query_embedding, load_embedding(chunk.embedding))
+        score, keyword_bonus = apply_hybrid_score(vector_score, payload.query, chunk, document, settings)
         if score >= settings.rag_min_score:
-            hits.append(SearchHit(chunk=chunk, document=document, score=score))
+            hits.append(SearchHit(chunk=chunk, document=document, score=score, vector_score=vector_score, keyword_bonus=keyword_bonus))
     hits.sort(key=lambda hit: hit.score, reverse=True)
     return hits[:top_k]
 
@@ -179,24 +190,25 @@ def search_vault_pgvector(
     session: Session,
     *,
     user_id: str,
+    workspace_id: str,
     payload: VaultSearchRequest,
     query_embedding: list[float],
     top_k: int,
     settings: Settings,
 ) -> list[SearchHit]:
     query_literal = format_vector_literal(query_embedding)
-    limit = max(top_k * 5, top_k)
+    limit = max(settings.rag_search_candidates, top_k * 5, top_k)
     sql = """
         SELECT c.id AS chunk_id, 1 - (c.embedding <=> CAST(:query_embedding AS vector)) AS score
         FROM vault_chunks c
         JOIN vault_documents d ON d.id = c.document_id
-        WHERE c.user_id = :user_id
+        WHERE c.workspace_id = :workspace_id
           AND c.vault_id = :vault_id
           AND d.deleted_at IS NULL
     """
     params: dict[str, object] = {
         "query_embedding": query_literal,
-        "user_id": user_id,
+        "workspace_id": workspace_id,
         "vault_id": payload.vault_id,
         "limit": limit,
     }
@@ -217,12 +229,66 @@ def search_vault_pgvector(
             continue
         if tag_filter and not tag_filter.issubset(set(load_json_list(document.tags_json))):
             continue
-        score = float(row["score"] or 0.0)
-        if score >= settings.rag_min_score:
-            hits.append(SearchHit(chunk=chunk, document=document, score=score))
-        if len(hits) >= top_k:
-            break
-    return hits
+        vector_score = float(row["score"] or 0.0)
+        score, keyword_bonus = apply_hybrid_score(vector_score, payload.query, chunk, document, settings)
+        hits.append(SearchHit(chunk=chunk, document=document, score=score, vector_score=vector_score, keyword_bonus=keyword_bonus))
+    hits.sort(key=lambda hit: hit.score, reverse=True)
+    filtered = [hit for hit in hits if hit.score >= settings.rag_min_score]
+    selected = (filtered or hits)[:top_k]
+    logger.info(
+        "RAG search workspace_id=%s vault_id=%s query_len=%s top_k=%s candidates=%s after_threshold=%s selected_paths=%s scores=%s",
+        workspace_id,
+        payload.vault_id,
+        len(payload.query),
+        top_k,
+        len(hits),
+        len(filtered),
+        [hit.document.path for hit in selected],
+        [round(hit.score, 4) for hit in selected],
+    )
+    return selected
+
+
+def apply_hybrid_score(vector_score: float, query: str, chunk: VaultChunk, document: VaultDocument, settings: Settings) -> tuple[float, float]:
+    if not settings.rag_keyword_bonus_enabled:
+        return vector_score, 0.0
+    terms = extract_keyword_terms(query)
+    if not terms:
+        return vector_score, 0.0
+    path = document.path.lower()
+    title = (document.title or "").lower()
+    heading = (chunk.heading_path or "").lower()
+    content = chunk.content.lower()
+    tags = " ".join(load_json_list(document.tags_json)).lower()
+    bonus = 0.0
+    for term in terms:
+        normalized = term.lower()
+        if normalized in content:
+            bonus += 0.03
+        if normalized in heading:
+            bonus += 0.04
+        if normalized in title:
+            bonus += 0.06
+        if normalized in path:
+            bonus += 0.05
+        if normalized in tags:
+            bonus += 0.04
+    bounded_bonus = min(settings.rag_keyword_bonus_max, bonus)
+    return vector_score + bounded_bonus, bounded_bonus
+
+
+def extract_keyword_terms(query: str) -> list[str]:
+    raw_terms = re.findall(r"[\w.-]{3,}", query, flags=re.UNICODE)
+    stopwords = {
+        "avec", "dans", "pour", "quoi", "quel", "quelle", "comment", "d'apres", "apres", "mes", "notes",
+        "the", "and", "for", "what", "how", "from", "with",
+    }
+    terms: list[str] = []
+    for term in raw_terms:
+        lowered = term.lower()
+        if lowered not in stopwords and lowered not in terms:
+            terms.append(lowered)
+    return terms
 
 
 def build_vault_answer_prompt(*, question: str, hits: list[SearchHit], settings: Settings, answer_language: str) -> tuple[str, str]:
@@ -262,8 +328,8 @@ def build_insufficient_sources_answer(hits: list[SearchHit]) -> str:
     )
 
 
-def find_document(session: Session, *, user_id: str, vault_id: str, path: str) -> VaultDocument | None:
-    return session.scalar(select(VaultDocument).where(VaultDocument.user_id == user_id, VaultDocument.vault_id == vault_id, VaultDocument.path == path))
+def find_document(session: Session, *, workspace_id: str, vault_id: str, path: str) -> VaultDocument | None:
+    return session.scalar(select(VaultDocument).where(VaultDocument.workspace_id == workspace_id, VaultDocument.vault_id == vault_id, VaultDocument.path == path))
 
 
 def count_document_chunks(session: Session, document_id: str) -> int:

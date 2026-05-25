@@ -173,6 +173,7 @@ Required scope: `vault:index`
 ```json
 {
   "vault_id": "default",
+  "workspace_id": "default",
   "path": "Projects/Note Compagnon.md",
   "title": "Note Compagnon",
   "content": "...markdown...",
@@ -199,6 +200,7 @@ Required scope: `vault:search`
 ```json
 {
   "vault_id": "default",
+  "workspace_id": "default",
   "query": "ce que j'ai decide pour CouchDB",
   "top_k": 8,
   "path_prefix": "Projects/",
@@ -206,7 +208,7 @@ Required scope: `vault:search`
 }
 ```
 
-Uses PostgreSQL + pgvector in production. Scores are derived from cosine distance (`score = 1 - distance`) using pgvector's `<=>` operator. Returns bounded snippets only, never full notes.
+Uses PostgreSQL + pgvector in production, then applies a small keyword bonus for exact terms in `path`, `title`, `heading_path`, `content`, and tags. The base vector score is derived from cosine distance (`score = 1 - distance`) using pgvector's `<=>` operator. Returns bounded snippets only, never full notes.
 
 ```bash
 curl -X POST "$API_BASE_URL/v1/vault/search" \
@@ -222,12 +224,14 @@ Required scope: `vault:ask`
 ```json
 {
   "vault_id": "default",
+  "workspace_id": "default",
   "question": "Quelle solution avais-je retenue pour CouchDB ?",
   "model": "mistral:latest",
   "top_k": 8,
   "path_prefix": null,
   "tags": [],
-  "answer_language": "same_as_input"
+  "answer_language": "same_as_input",
+  "debug": false
 }
 ```
 
@@ -251,6 +255,20 @@ The gateway searches indexed chunks through the same pgvector search layer as `/
 
 If no source is relevant enough, the answer says that the available notes are insufficient. The endpoint must not claim to have read the whole vault.
 
+Set `debug=true` to return safe search diagnostics without full note content:
+
+```json
+{
+  "debug_info": {
+    "search_candidates_count": 8,
+    "selected_sources_count": 3,
+    "min_score": 0.15,
+    "top_scores": [0.82, 0.61],
+    "selected_paths": ["Projects/Note Compagnon.md"]
+  }
+}
+```
+
 ```bash
 curl -X POST "$API_BASE_URL/v1/vault/ask" \
   -H "Authorization: Bearer $TOKEN" \
@@ -266,7 +284,30 @@ Required scope: `vault:search` or `vault:admin`
 
 Required scope: `vault:admin`
 
-Deletes only the authenticated user's index for the selected `vault_id`.
+Deletes the selected workspace index for the selected `vault_id`.
+
+Optional query params:
+
+- `workspace_id=default` selects a stable RAG workspace shared by regenerated tokens
+- `all_users=true` deletes the full RAG index for the `vault_id`, across every `workspace_id` and historical `user_id`
+
+`all_users=true` is an administrative cleanup action for duplicate token/user spaces. It deletes only RAG index rows, never Obsidian notes or other backend tables.
+
+```bash
+curl -X DELETE "$API_BASE_URL/v1/vault/index?vault_id=default&all_users=true" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### `DELETE /v1/vault/document`
+
+Required scope: `vault:index`
+
+Deletes one indexed document for the selected workspace and vault. This is intended for Obsidian rename/delete cleanup and never deletes a local Obsidian note.
+
+```bash
+curl -X DELETE "$API_BASE_URL/v1/vault/document?vault_id=default&path=Projects%2FRAG.md" \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 RAG error behavior:
 

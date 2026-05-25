@@ -204,10 +204,14 @@ Important variables:
 - `RAG_CHUNK_OVERLAP=150`
 - `RAG_MAX_CHUNKS_PER_QUERY=8`
 - `RAG_MAX_CONTEXT_CHARS=24000`
-- `RAG_MIN_SCORE=0.25`
+- `RAG_SEARCH_CANDIDATES=30`
+- `RAG_MIN_SCORE=0.15`
+- `RAG_KEYWORD_BONUS_ENABLED=true`
+- `RAG_KEYWORD_BONUS_MAX=0.20`
 - `RAG_INDEX_EXCLUDED_DIRS=.obsidian,Templates,Archives,Private`
 - `RAG_INDEX_EXCLUDED_TAGS=noai,private`
 - `RAG_DEFAULT_VAULT_ID=default`
+- `RAG_WORKSPACE_ID=default`
 
 Prepare the embedding model in Docker Ollama through the selective model script:
 
@@ -241,6 +245,25 @@ Migration note:
 - if an earlier development build indexed notes with JSON embeddings, those embeddings are not used by the pgvector backend
 - delete/recreate the RAG index or reindex notes after migrating to pgvector
 - when the plugin indexing workflow is added, run a full reindex from Obsidian
+- automatic indexing, when enabled in the plugin, only runs while Obsidian is open
+- with several Obsidian devices or regenerated tokens, keep the same `vault_id` and `workspace_id` if they should feed the same backend index
+- `/v1/vault/search` uses pgvector first, then a small keyword bonus for exact terms in path, title, heading, tags and chunk text
+
+If old tokens created several RAG spaces for the same vault, reset and rebuild the index:
+
+```powershell
+docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec ai-gateway `
+  python -m app.cli create-token --name "rag-admin-reset" --scopes "vault:admin,vault:search"
+
+# Then call DELETE /v1/vault/index?vault_id=default&all_users=true with that token,
+# or use "Reinitialiser index" from the plugin dashboard with a full token.
+```
+
+After the purge:
+
+1. verify stats are back to 0 for the vault
+2. keep `Workspace RAG = default` in the plugin
+3. reindex from Obsidian
 
 Create a full Note Compagnon token for future plugin RAG indexing:
 

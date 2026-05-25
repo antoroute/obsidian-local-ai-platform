@@ -41,11 +41,15 @@ class Settings(BaseSettings):
     rag_chunk_size: int = Field(default=900, alias="RAG_CHUNK_SIZE")
     rag_chunk_overlap: int = Field(default=150, alias="RAG_CHUNK_OVERLAP")
     rag_max_chunks_per_query: int = Field(default=8, alias="RAG_MAX_CHUNKS_PER_QUERY")
+    rag_search_candidates: int = Field(default=30, alias="RAG_SEARCH_CANDIDATES")
     rag_max_context_chars: int = Field(default=24000, alias="RAG_MAX_CONTEXT_CHARS")
-    rag_min_score: float = Field(default=0.25, alias="RAG_MIN_SCORE")
+    rag_min_score: float = Field(default=0.15, alias="RAG_MIN_SCORE")
+    rag_keyword_bonus_enabled: bool = Field(default=True, alias="RAG_KEYWORD_BONUS_ENABLED")
+    rag_keyword_bonus_max: float = Field(default=0.20, alias="RAG_KEYWORD_BONUS_MAX")
     rag_index_excluded_dirs_raw: str = Field(default=".obsidian,Templates,Archives,Private", alias="RAG_INDEX_EXCLUDED_DIRS")
     rag_index_excluded_tags_raw: str = Field(default="noai,private", alias="RAG_INDEX_EXCLUDED_TAGS")
     rag_default_vault_id: str = Field(default="default", alias="RAG_DEFAULT_VAULT_ID")
+    rag_workspace_id: str = Field(default="", alias="RAG_WORKSPACE_ID")
 
     @property
     def allowed_models(self) -> list[str]:

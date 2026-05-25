@@ -322,10 +322,12 @@ async def vault_index_note(
     embedding_client: Annotated[OllamaEmbeddingClient, Depends(get_embedding_client)],
 ) -> VaultIndexNoteResponse:
     settings = get_settings()
+    workspace_id = resolve_rag_workspace_id(token, settings, payload.workspace_id)
     try:
         status_value, document, chunks_indexed, content_hash = await index_note(
             session,
             user_id=token.user_id,
+            workspace_id=workspace_id,
             payload=payload,
             settings=settings,
             embed_text=lambda text: _embed_text(embedding_client, text),
@@ -352,10 +354,12 @@ async def vault_search(
     embedding_client: Annotated[OllamaEmbeddingClient, Depends(get_embedding_client)],
 ) -> VaultSearchResponse:
     settings = get_settings()
+    workspace_id = resolve_rag_workspace_id(token, settings, payload.workspace_id)
     try:
         hits = await search_vault(
             session,
             user_id=token.user_id,
+            workspace_id=workspace_id,
             payload=payload,
             settings=settings,
             embed_text=lambda text: _embed_text(embedding_client, text),
@@ -392,12 +396,15 @@ async def vault_ask(
     settings = get_settings()
     ensure_rag_enabled(settings)
     selected_model = validate_vault_model(payload.model or settings.default_model, settings)
+    workspace_id = resolve_rag_workspace_id(token, settings, payload.workspace_id)
     try:
         hits = await search_vault(
             session,
             user_id=token.user_id,
+            workspace_id=workspace_id,
             payload=VaultSearchRequest(
                 vault_id=payload.vault_id,
+                workspace_id=workspace_id,
                 query=payload.question,
                 top_k=payload.top_k,
                 path_prefix=payload.path_prefix,
@@ -421,8 +428,9 @@ async def vault_ask(
         )
         for hit in hits
     ]
-    if not hits:
-        return VaultAskResponse(model=selected_model, answer_markdown=build_insufficient_sources_answer(hits), sources=sources)
+    debug_info = build_vault_debug_info(hits, settings) if payload.debug else None
+    if not hits or all(hit.score < settings.rag_min_score for hit in hits):
+        return VaultAskResponse(model=selected_model, answer_markdown=build_insufficient_sources_answer(hits), sources=sources, debug_info=debug_info)
 
     system_prompt, user_prompt = build_vault_answer_prompt(
         question=payload.question,
@@ -443,7 +451,7 @@ async def vault_ask(
     except OllamaResponseError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="The vault answer backend returned an invalid response.") from exc
 
-    return VaultAskResponse(model=result.model, answer_markdown=result.content, sources=sources)
+    return VaultAskResponse(model=result.model, answer_markdown=result.content, sources=sources, debug_info=debug_info)
 
 
 @app.get("/v1/vault/stats", tags=["vault"], response_model=VaultStatsResponse)
@@ -451,16 +459,18 @@ def vault_stats(
     token: Annotated[ApiToken, Depends(get_current_token)],
     session: Annotated[Session, Depends(get_db_session)],
     vault_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> VaultStatsResponse:
     settings = get_settings()
     ensure_rag_enabled(settings)
     if not (token_has_scope(token, "vault:search") or token_has_scope(token, "vault:admin")):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing required scope: vault:search or vault:admin")
     selected_vault_id = vault_id or settings.rag_default_vault_id
-    documents = int(session.scalar(select(func.count()).select_from(VaultDocument).where(VaultDocument.user_id == token.user_id, VaultDocument.vault_id == selected_vault_id, VaultDocument.deleted_at.is_(None))) or 0)
-    chunks = int(session.scalar(select(func.count()).select_from(VaultChunk).where(VaultChunk.user_id == token.user_id, VaultChunk.vault_id == selected_vault_id)) or 0)
-    last_indexed = session.scalar(select(func.max(VaultDocument.indexed_at)).where(VaultDocument.user_id == token.user_id, VaultDocument.vault_id == selected_vault_id))
-    return VaultStatsResponse(vault_id=selected_vault_id, documents=documents, chunks=chunks, last_indexed_at=last_indexed.isoformat() if last_indexed else None)
+    selected_workspace_id = resolve_rag_workspace_id(token, settings, workspace_id)
+    documents = int(session.scalar(select(func.count()).select_from(VaultDocument).where(VaultDocument.workspace_id == selected_workspace_id, VaultDocument.vault_id == selected_vault_id, VaultDocument.deleted_at.is_(None))) or 0)
+    chunks = int(session.scalar(select(func.count()).select_from(VaultChunk).where(VaultChunk.workspace_id == selected_workspace_id, VaultChunk.vault_id == selected_vault_id)) or 0)
+    last_indexed = session.scalar(select(func.max(VaultDocument.indexed_at)).where(VaultDocument.workspace_id == selected_workspace_id, VaultDocument.vault_id == selected_vault_id))
+    return VaultStatsResponse(vault_id=selected_vault_id, workspace_id=selected_workspace_id, documents=documents, chunks=chunks, last_indexed_at=last_indexed.isoformat() if last_indexed else None)
 
 
 @app.delete("/v1/vault/index", tags=["vault"], response_model=VaultDeleteResponse)
@@ -468,15 +478,61 @@ def vault_delete_index(
     token: Annotated[ApiToken, Depends(require_scope("vault:admin"))],
     session: Annotated[Session, Depends(get_db_session)],
     vault_id: str | None = None,
+    workspace_id: str | None = None,
+    all_users: bool = False,
 ) -> VaultDeleteResponse:
     settings = get_settings()
     ensure_rag_enabled(settings)
     selected_vault_id = vault_id or settings.rag_default_vault_id
-    chunks = int(session.scalar(select(func.count()).select_from(VaultChunk).where(VaultChunk.user_id == token.user_id, VaultChunk.vault_id == selected_vault_id)) or 0)
-    documents = int(session.scalar(select(func.count()).select_from(VaultDocument).where(VaultDocument.user_id == token.user_id, VaultDocument.vault_id == selected_vault_id)) or 0)
-    session.execute(delete(VaultDocument).where(VaultDocument.user_id == token.user_id, VaultDocument.vault_id == selected_vault_id))
+    selected_workspace_id = None if all_users else resolve_rag_workspace_id(token, settings, workspace_id)
+    if all_users:
+        chunks = int(session.scalar(select(func.count()).select_from(VaultChunk).where(VaultChunk.vault_id == selected_vault_id)) or 0)
+        documents = int(session.scalar(select(func.count()).select_from(VaultDocument).where(VaultDocument.vault_id == selected_vault_id)) or 0)
+        session.execute(delete(VaultDocument).where(VaultDocument.vault_id == selected_vault_id))
+    else:
+        chunks = int(session.scalar(select(func.count()).select_from(VaultChunk).where(VaultChunk.workspace_id == selected_workspace_id, VaultChunk.vault_id == selected_vault_id)) or 0)
+        documents = int(session.scalar(select(func.count()).select_from(VaultDocument).where(VaultDocument.workspace_id == selected_workspace_id, VaultDocument.vault_id == selected_vault_id)) or 0)
+        session.execute(delete(VaultDocument).where(VaultDocument.workspace_id == selected_workspace_id, VaultDocument.vault_id == selected_vault_id))
     session.commit()
-    return VaultDeleteResponse(vault_id=selected_vault_id, deleted_documents=documents, deleted_chunks=chunks)
+    return VaultDeleteResponse(vault_id=selected_vault_id, workspace_id=selected_workspace_id, all_users=all_users, deleted_documents=documents, deleted_chunks=chunks)
+
+
+@app.delete("/v1/vault/document", tags=["vault"], response_model=VaultDeleteResponse)
+def vault_delete_document(
+    token: Annotated[ApiToken, Depends(require_scope("vault:index"))],
+    session: Annotated[Session, Depends(get_db_session)],
+    vault_id: str | None = None,
+    workspace_id: str | None = None,
+    path: str | None = None,
+) -> VaultDeleteResponse:
+    settings = get_settings()
+    ensure_rag_enabled(settings)
+    selected_vault_id = vault_id or settings.rag_default_vault_id
+    selected_workspace_id = resolve_rag_workspace_id(token, settings, workspace_id)
+    if not path:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="path is required.")
+    document = session.scalar(select(VaultDocument).where(VaultDocument.workspace_id == selected_workspace_id, VaultDocument.vault_id == selected_vault_id, VaultDocument.path == path))
+    if document is None:
+        return VaultDeleteResponse(vault_id=selected_vault_id, workspace_id=selected_workspace_id, deleted_documents=0, deleted_chunks=0)
+    chunks = int(session.scalar(select(func.count()).select_from(VaultChunk).where(VaultChunk.document_id == document.id)) or 0)
+    session.delete(document)
+    session.commit()
+    return VaultDeleteResponse(vault_id=selected_vault_id, workspace_id=selected_workspace_id, deleted_documents=1, deleted_chunks=chunks)
+
+
+def build_vault_debug_info(hits, settings) -> dict[str, object]:
+    return {
+        "search_candidates_count": len(hits),
+        "selected_sources_count": len(hits),
+        "min_score": settings.rag_min_score,
+        "top_scores": [round(hit.score, 6) for hit in hits[:10]],
+        "selected_paths": [hit.document.path for hit in hits],
+    }
+
+
+def resolve_rag_workspace_id(token: ApiToken, settings, requested_workspace_id: str | None = None) -> str:
+    configured = (requested_workspace_id or settings.rag_workspace_id or "").strip()
+    return configured or token.user_id
 
 
 async def _embed_text(embedding_client: OllamaEmbeddingClient, text: str) -> list[float]:

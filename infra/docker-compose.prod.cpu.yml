@@ -8,6 +8,11 @@ services:
       RAG_EMBEDDING_PROVIDER: ollama
       RAG_EMBEDDING_MODEL: nomic-embed-text:latest
       RAG_EMBEDDING_DIMENSION: "768"
+      RAG_SEARCH_CANDIDATES: "30"
+      RAG_MIN_SCORE: "0.15"
+      RAG_KEYWORD_BONUS_ENABLED: "true"
+      RAG_KEYWORD_BONUS_MAX: "0.20"
+      RAG_WORKSPACE_ID: default
 
   whisper-worker:
     build:

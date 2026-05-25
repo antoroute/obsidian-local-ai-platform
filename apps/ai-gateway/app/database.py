@@ -43,6 +43,7 @@ def init_db() -> None:
     ensure_pgvector_extension(engine)
     Base.metadata.create_all(bind=engine)
     ensure_job_metadata_column(engine)
+    ensure_vault_workspace_columns(engine)
     ensure_pgvector_support(engine)
 
 
@@ -55,6 +56,25 @@ def ensure_job_metadata_column(engine: Engine) -> None:
         return
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE jobs ADD COLUMN metadata_json TEXT"))
+
+
+def ensure_vault_workspace_columns(engine: Engine) -> None:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "vault_documents" not in tables or "vault_chunks" not in tables:
+        return
+    document_columns = {column["name"] for column in inspector.get_columns("vault_documents")}
+    chunk_columns = {column["name"] for column in inspector.get_columns("vault_chunks")}
+    with engine.begin() as connection:
+        if "workspace_id" not in document_columns:
+            connection.execute(text("ALTER TABLE vault_documents ADD COLUMN workspace_id VARCHAR(100)"))
+            connection.execute(text("UPDATE vault_documents SET workspace_id = user_id WHERE workspace_id IS NULL OR workspace_id = ''"))
+        if "workspace_id" not in chunk_columns:
+            connection.execute(text("ALTER TABLE vault_chunks ADD COLUMN workspace_id VARCHAR(100)"))
+            connection.execute(text("UPDATE vault_chunks SET workspace_id = user_id WHERE workspace_id IS NULL OR workspace_id = ''"))
+        if engine.dialect.name == "postgresql":
+            connection.execute(text("ALTER TABLE vault_documents ALTER COLUMN workspace_id SET NOT NULL"))
+            connection.execute(text("ALTER TABLE vault_chunks ALTER COLUMN workspace_id SET NOT NULL"))
 
 
 def ensure_pgvector_extension(engine: Engine) -> None:
@@ -77,8 +97,11 @@ def ensure_pgvector_support(engine: Engine) -> None:
         connection.execute(text("ALTER TABLE vault_chunks DROP COLUMN IF EXISTS embedding_json"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_documents_user_vault ON vault_documents (user_id, vault_id)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_chunks_user_vault ON vault_chunks (user_id, vault_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_documents_workspace_vault ON vault_documents (workspace_id, vault_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_chunks_workspace_vault ON vault_chunks (workspace_id, vault_id)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_chunks_document ON vault_chunks (document_id)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_documents_user_vault_path ON vault_documents (user_id, vault_id, path)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_documents_workspace_vault_path ON vault_documents (workspace_id, vault_id, path)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_vault_chunks_path ON vault_chunks (path)"))
     try:
         with engine.begin() as connection:

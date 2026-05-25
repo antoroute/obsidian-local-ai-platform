@@ -25,24 +25,13 @@ Place `manifest.json` and `main.js` there.
 
 Configure these settings in Obsidian:
 
-- `API Base URL`
-- `API Token`
-- `Default model`
-- `Templates folder`
-- `Meetings folder`
-- `Recordings folder`
-- `Output folder`
-- `Transcription language`
-- `Output language`
-- `Preferred template language`
-- `Activer la connaissance du vault`
-- `Identifiant du vault`
-- `Dossiers exclus de l'index`
-- `Tags exclus de l'index`
-- `Taille maximale d'une note a indexer`
-- `Mode d'enregistrement`
-- `Microphone`
-- `Son ordinateur`
+- `General`: API Base URL, API Token, default model, connection test
+- `Assistant`: quick actions language
+- `Reunions`: meeting, recording and output folders, transcription language, output language
+- `Audio`: recording mode, microphone, computer audio input, refresh and test buttons
+- `Connaissance du vault`: RAG enabled, vault ID, indexing mode, exclusions, local indexing state
+- `Templates`: templates folder, preferred template language, recommended template installer
+- `Avance`: technical information
 
 Required API scopes:
 
@@ -113,8 +102,22 @@ Dashboard actions:
 - `Indexer note`: indexes the active Markdown note
 - `Indexer dossier`: indexes Markdown notes in the active note's folder
 - `Indexer vault`: indexes all admissible Markdown notes in the vault
+- `Forcer reindex`: queues all Markdown notes again
+- `Reindex erreurs`: queues notes that failed during automatic or manual indexing
+- `Tester la recherche RAG`: calls `/v1/vault/search` and shows candidate chunks before generation
+- `Annuler`: cancels the current indexing queue
 - `Statistiques`: calls `GET /v1/vault/stats`
-- `Supprimer index`: asks for confirmation, then calls `DELETE /v1/vault/index`
+- `Reinitialiser index`: asks for confirmation, then calls `DELETE /v1/vault/index`
+
+During folder/vault indexing, the dashboard shows a progress panel with total notes, processed notes, indexed/skipped/ignored/error counts, the current note, remaining notes and elapsed time.
+
+RAG enabled and indexing mode are separate settings:
+
+- `Activer la connaissance du vault` controls whether the dashboard can ask questions with `Avec le vault`.
+- `Mode d'indexation = Manuelle` never indexes automatically; use the dashboard buttons.
+- `Mode d'indexation = Automatique` indexes created/modified Markdown notes after a debounce, can periodically scan changed notes, and can optionally scan on startup.
+- Automatic indexing only runs while Obsidian is open. LiveSync can synchronize the vault, but Note Compagnon still indexes only local decrypted notes.
+- `Workspace RAG` is a stable namespace for the vault index. Keep it identical when you regenerate tokens so the new token sees the same indexed notes.
 
 Exclusions are applied before any note is sent to the gateway:
 
@@ -131,11 +134,17 @@ Security model:
 
 - the backend does not read CouchDB or LiveSync directly
 - LiveSync E2EE remains respected because only the local Obsidian plugin sees decrypted notes
-- only notes explicitly sent by the user-triggered indexing actions are stored in the RAG index
+- only notes sent by manual actions or optional automatic plugin indexing are stored in the RAG index
 - do not index private folders or notes; use excluded folders, excluded tags, or `ai_index: false`
-- deleting the RAG index does not delete any Obsidian note
+- reinitializing the RAG index does not delete any Obsidian note
+- `Reinitialiser mon index actuel` removes only the selected workspace
+- `Reinitialiser tout l'index du vault` removes all indexed rows for that vault across historical token/user spaces and requires `vault:admin`
 
 When using `Avec le vault`, Note Compagnon renders the answer as Markdown and shows sources. If a source path exists locally, clicking it opens the note. If no source is returned, the dashboard suggests indexing the vault or reformulating the question.
+
+Use `Tester la recherche RAG` when an answer seems weak. It displays the retrieved paths, snippets and scores before the LLM writes an answer, which helps distinguish an indexing problem from a generation problem.
+
+If several generated tokens created separate RAG spaces, use a full/admin token, run `Reinitialiser tout l'index du vault`, then reindex once with `Workspace RAG = default`.
 
 ## Selected Text Actions
 

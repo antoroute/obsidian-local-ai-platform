@@ -19,9 +19,10 @@ If context is provided, use it only as reference material."""
 
 MODE_INSTRUCTIONS = {
     "chat": (
-        "Answer the user's question directly, clearly, and practically. "
+        "Answer the user's question directly, clearly, and practically. Prefer a short direct answer by default. "
         "If no context is provided, do not invent context and answer generally from the user message only. "
-        "If context is provided, use it only as reference material. "
+        "If context is provided, use it only as reference material to answer the specific question. "
+        "Do not automatically summarize the context. Do not transform the context into meeting minutes, a report, or an Obsidian note. "
         "Do not use, fill, or imitate a note template unless explicitly requested."
     ),
     "correct": (
