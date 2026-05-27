@@ -1,4 +1,4 @@
-import {
+﻿import {
   App,
   Editor,
   ItemView,
@@ -262,6 +262,7 @@ interface AssistantChatRequestPayload {
   mode: "chat" | "correct" | "rewrite" | "summarize";
   output_language: "same_as_input" | "fr" | "en";
   response_style?: "direct" | "detailed";
+  action_preset?: "professional";
   model: string;
 }
 
@@ -382,12 +383,16 @@ interface VaultSourcePayload {
   heading_path: string | null;
   chunk_index: number;
   score: number;
+  vector_score?: number | null;
+  keyword_bonus?: number | null;
+  matched_terms?: string[];
 }
 
 interface VaultAskResponsePayload {
   model: string;
   answer_markdown: string;
   sources: VaultSourcePayload[];
+  debug_info?: Record<string, unknown> | null;
 }
 
 interface VaultSearchResponsePayload {
@@ -401,6 +406,9 @@ interface VaultSearchResultPayload {
   heading_path: string | null;
   snippet: string;
   score: number;
+  vector_score?: number | null;
+  keyword_bonus?: number | null;
+  matched_terms?: string[];
   chunk_index: number;
 }
 
@@ -641,6 +649,13 @@ export default class LocalAiPlatformPlugin extends Plugin {
       },
     });
     this.addCommand({
+      id: "rewrite-selected-text-professional",
+      name: "Note Compagnon: Reecrire plus professionnel",
+      editorCallback: async (editor) => {
+        await this.runAssistantOnSelection(editor, "rewrite", "professional");
+      },
+    });
+    this.addCommand({
       id: "summarize-selected-text",
       name: "Note Compagnon: Summarize selected text",
       editorCallback: async (editor) => {
@@ -700,6 +715,11 @@ export default class LocalAiPlatformPlugin extends Plugin {
     menu.addItem((item) =>
       item.setTitle("Note Compagnon: Reecrire").setIcon("pencil").onClick(() => {
         void this.runAssistantOnSelection(editor, "rewrite");
+      }),
+    );
+    menu.addItem((item) =>
+      item.setTitle("Note Compagnon: Plus professionnel").setIcon("briefcase").onClick(() => {
+        void this.runAssistantOnSelection(editor, "rewrite", "professional");
       }),
     );
     menu.addItem((item) =>
@@ -812,11 +832,6 @@ export default class LocalAiPlatformPlugin extends Plugin {
         const noteContent = buildMeetingSourceNote({
           title: metadata.title,
           startedAt,
-          recordingStatus: "in progress",
-          recordingSourceRequested: this.getRecordingSource(),
-          recordingSourceUsed: recordingStream.recordingSourceUsed,
-          microphoneInputDeviceLabel: this.getSelectedMicrophoneInputLabel(),
-          computerAudioInputDeviceLabel: this.getSelectedComputerAudioInputLabel(),
         });
         const noteFile = await createOrReplaceFile(this.app, notePath, noteContent);
         await this.app.workspace.getLeaf(true).openFile(noteFile);
@@ -1434,7 +1449,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         404: "The transcription job was not found.",
         409: "The transcription job is not ready or failed.",
         413: "The notes, participants, or template exceed the AI Gateway limits.",
-        422: "The meeting request is invalid.",
+        422: "La transcription est vide ou la demande de compte rendu est invalide. Verifie que l'audio contient une voix detectable.",
         500: "The stored transcription result is invalid.",
         502: "The AI Gateway returned an invalid upstream response.",
         503: "The AI Gateway meeting generation service is unavailable.",
@@ -1514,6 +1529,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         model: this.getDefaultModel(),
         top_k: 8,
         answer_language: "same_as_input",
+        debug: true,
       }),
       errorMap: {
         401: "Token invalide ou expire.",
@@ -2020,13 +2036,14 @@ export default class LocalAiPlatformPlugin extends Plugin {
     });
   }
 
-  async askDashboardAssistant(message: string, mode: AssistantResponseMode): Promise<{ answerMarkdown: string; sources: VaultSourcePayload[] }> {
+  async askDashboardAssistant(message: string, mode: AssistantResponseMode): Promise<{ answerMarkdown: string; sources: VaultSourcePayload[]; debugInfo: Record<string, unknown> | null }> {
     this.validateCoreSettings();
     if (mode === "vault") {
       const response = await this.askVault(message);
       return {
         answerMarkdown: cleanGeneratedMarkdown(response.answer_markdown),
         sources: response.sources,
+        debugInfo: response.debug_info ?? null,
       };
     }
 
@@ -2035,12 +2052,16 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return {
       answerMarkdown: cleanGeneratedMarkdown(response.answer_markdown),
       sources: [],
+      debugInfo: null,
     };
   }
 
-  async runAssistantOnSelection(editor: Editor, mode: "correct" | "rewrite" | "summarize"): Promise<void> {
+  async runAssistantOnSelection(editor: Editor, mode: "correct" | "rewrite" | "summarize", preset?: "professional"): Promise<void> {
     try {
       this.validateCoreSettings();
+      if (preset === "professional" && mode !== "rewrite") {
+        throw new UserFacingError("Le preset professionnel est disponible uniquement pour la reecriture.");
+      }
       const selection = editor.getSelection();
       if (!selection.trim()) {
         throw new UserFacingError("Selectionne un texte dans une note, puis lance la commande depuis la palette ou le clic droit.");
@@ -2053,9 +2074,10 @@ export default class LocalAiPlatformPlugin extends Plugin {
         mode,
         output_language: this.getQuickActionsLanguage(),
         response_style: "direct",
+        ...(preset === "professional" ? { action_preset: "professional" as const } : {}),
         model: this.getDefaultModel(),
       });
-      const cleanedAnswer = cleanGeneratedMarkdown(response.answer_markdown);
+      const cleanedAnswer = cleanAssistantActionResult(cleanGeneratedMarkdown(response.answer_markdown));
 
       await previewAssistantReplacement(this.app, cleanedAnswer, (action) => {
         if (action === "replace") {
@@ -2499,6 +2521,7 @@ class NoteCompagnonDashboardView extends ItemView {
   private lastAssistantAnswer = "";
   private lastVaultSources: VaultSourcePayload[] = [];
   private lastVaultSearchResults: VaultSearchResultPayload[] = [];
+  private lastVaultDebugInfo: Record<string, unknown> | null = null;
   private lastVaultStats: VaultStatsResponsePayload | null = null;
   private assistantResponseMode: AssistantResponseMode = "simple";
   private progressRefreshTimer: number | null = null;
@@ -2674,7 +2697,7 @@ class NoteCompagnonDashboardView extends ItemView {
           const response = await this.plugin.searchVault(searchInput.value.trim());
           this.lastVaultSearchResults = response.results;
           if (response.results.length === 0) {
-            new Notice("Aucun chunk trouve. Verifie que le vault a ete indexe avec le meme workspace/token.", 8000);
+            new Notice("Aucun chunk trouve. Verifie indexation, workspace, tags exclus, dossiers exclus, ou reformule avec des mots-cles exacts.", 9000);
           }
           await this.render();
         } catch (error) {
@@ -2777,6 +2800,7 @@ class NoteCompagnonDashboardView extends ItemView {
       const response = await this.plugin.askDashboardAssistant(message, this.assistantResponseMode);
       this.lastAssistantAnswer = response.answerMarkdown;
       this.lastVaultSources = response.sources;
+      this.lastVaultDebugInfo = response.debugInfo;
       await this.renderAssistantAnswer();
       if (this.chatActionsEl) {
         this.chatActionsEl.style.display = "flex";
@@ -2815,6 +2839,9 @@ class NoteCompagnonDashboardView extends ItemView {
     await MarkdownRenderer.renderMarkdown(this.lastAssistantAnswer, this.chatResponseEl, "", this);
     if (this.lastVaultSources.length > 0) {
       this.renderVaultSources(this.chatResponseEl, this.lastVaultSources);
+      if (this.lastVaultDebugInfo) {
+        this.renderVaultDebugInfo(this.chatResponseEl, this.lastVaultDebugInfo);
+      }
     } else if (this.assistantResponseMode === "vault") {
       const empty = this.chatResponseEl.createEl("p");
       empty.textContent = "Je n'ai pas trouve assez d'informations dans l'index du vault. Essaie d'indexer le vault ou de reformuler la question.";
@@ -2841,8 +2868,19 @@ class NoteCompagnonDashboardView extends ItemView {
       } else {
         item.createSpan({ text: label });
       }
-      item.createSpan({ text: ` (score ${source.score.toFixed(2)}, chunk ${source.chunk_index})` });
+      item.createSpan({ text: ` (${formatRagScoreDetails(source)}, chunk ${source.chunk_index})` });
     }
+  }
+
+  private renderVaultDebugInfo(container: HTMLElement, debugInfo: Record<string, unknown>): void {
+    const details = container.createEl("details");
+    details.createEl("summary", { text: "Diagnostic RAG" });
+    const selectedPaths = Array.isArray(debugInfo.selected_paths) ? debugInfo.selected_paths.map(String).join(", ") : "n/a";
+    const topScores = Array.isArray(debugInfo.top_scores) ? debugInfo.top_scores.map(String).join(", ") : "n/a";
+    const keywordBonuses = Array.isArray(debugInfo.top_keyword_bonuses) ? debugInfo.top_keyword_bonuses.map(String).join(", ") : "n/a";
+    new Setting(details).setName("Sources selectionnees").setDesc(selectedPaths);
+    new Setting(details).setName("Scores").setDesc(topScores);
+    new Setting(details).setName("Bonus mots-cles").setDesc(keywordBonuses);
   }
 
   private renderVaultSearchResults(container: HTMLElement, results: VaultSearchResultPayload[]): void {
@@ -2852,7 +2890,7 @@ class NoteCompagnonDashboardView extends ItemView {
     for (const result of results) {
       const setting = new Setting(details)
         .setName(`${result.title || result.path}${result.heading_path ? ` - ${result.heading_path}` : ""}`)
-        .setDesc(`${result.snippet} | score ${result.score.toFixed(3)} | chunk ${result.chunk_index}`);
+        .setDesc(`${result.snippet} | ${formatRagScoreDetails(result)} | chunk ${result.chunk_index}`);
       const file = this.app.vault.getAbstractFileByPath(result.path);
       if (file instanceof TFile) {
         setting.addButton((button) => button.setButtonText("Ouvrir").onClick(async () => {
@@ -3689,7 +3727,10 @@ function isVaultSourcePayload(value: unknown): value is VaultSourcePayload {
     (typeof candidate.title === "string" || candidate.title === null) &&
     (typeof candidate.heading_path === "string" || candidate.heading_path === null) &&
     typeof candidate.chunk_index === "number" &&
-    typeof candidate.score === "number"
+    typeof candidate.score === "number" &&
+    isOptionalNumber(candidate.vector_score) &&
+    isOptionalNumber(candidate.keyword_bonus) &&
+    isOptionalStringArray(candidate.matched_terms)
   );
 }
 
@@ -3700,7 +3741,8 @@ function isVaultAskResponsePayload(value: unknown): value is VaultAskResponsePay
     typeof candidate.model === "string" &&
     typeof candidate.answer_markdown === "string" &&
     Array.isArray(candidate.sources) &&
-    candidate.sources.every(isVaultSourcePayload)
+    candidate.sources.every(isVaultSourcePayload) &&
+    (typeof candidate.debug_info === "object" || candidate.debug_info === null || typeof candidate.debug_info === "undefined")
   );
 }
 
@@ -3713,8 +3755,19 @@ function isVaultSearchResultPayload(value: unknown): value is VaultSearchResultP
     (typeof candidate.heading_path === "string" || candidate.heading_path === null) &&
     typeof candidate.snippet === "string" &&
     typeof candidate.score === "number" &&
+    isOptionalNumber(candidate.vector_score) &&
+    isOptionalNumber(candidate.keyword_bonus) &&
+    isOptionalStringArray(candidate.matched_terms) &&
     typeof candidate.chunk_index === "number"
   );
+}
+
+function isOptionalNumber(value: unknown): boolean {
+  return typeof value === "number" || value === null || typeof value === "undefined";
+}
+
+function isOptionalStringArray(value: unknown): boolean {
+  return typeof value === "undefined" || (Array.isArray(value) && value.every((item) => typeof item === "string"));
 }
 
 function isVaultSearchResponsePayload(value: unknown): value is VaultSearchResponsePayload {
@@ -3821,6 +3874,16 @@ function formatDateTimeForFile(date: Date): string {
   const hours = `${date.getHours()}`.padStart(2, "0");
   const minutes = `${date.getMinutes()}`.padStart(2, "0");
   return `${year}-${month}-${day} ${hours}-${minutes}`;
+}
+
+function formatLocalDateTime(date: Date): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  const hours = `${date.getHours()}`.padStart(2, "0");
+  const minutes = `${date.getMinutes()}`.padStart(2, "0");
+  const seconds = `${date.getSeconds()}`.padStart(2, "0");
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
 }
 
 function formatIsoTimestamp(date: Date): string {
@@ -4170,6 +4233,45 @@ function formatRecordingSourceLabel(recordingSource: RecordingSource, microphone
   return `Micro seul (${microphoneLabel})`;
 }
 
+function formatRagScoreDetails(result: { score: number; vector_score?: number | null; keyword_bonus?: number | null; matched_terms?: string[] }): string {
+  const details = [`score ${result.score.toFixed(3)}`];
+  if (typeof result.vector_score === "number") {
+    details.push(`vector ${result.vector_score.toFixed(3)}`);
+  }
+  if (typeof result.keyword_bonus === "number") {
+    details.push(`bonus ${result.keyword_bonus.toFixed(3)}`);
+  }
+  if (result.matched_terms && result.matched_terms.length > 0) {
+    details.push(`termes: ${result.matched_terms.slice(0, 8).join(", ")}`);
+  }
+  return details.join(" | ");
+}
+
+function cleanAssistantActionResult(markdown: string): string {
+  let cleaned = markdown.trim();
+  const finalMatch = cleaned.match(/(?:^|\n)\s*(?:final|final text|texte final|rÃ©sultat|resultat)\s*:\s*\n?/i);
+  if (finalMatch?.index !== undefined) {
+    cleaned = cleaned.slice(finalMatch.index + finalMatch[0].length).trim();
+  }
+
+  const lines = cleaned.split("\n");
+  const kept = lines.filter((line) => {
+    const normalized = line.trim().toLowerCase();
+    return ![
+      "original:",
+      "texte original:",
+      "task instruction:",
+      "instruction:",
+      "text to process:",
+      "texte a traiter:",
+      "texte Ã  traiter:",
+      "<<<text",
+      "text",
+    ].includes(normalized);
+  });
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function findLikelySystemAudioInput(devices: AudioInputDeviceChoice[]): AudioInputDeviceChoice | null {
   const patterns = ["mixage stereo", "stereo mix", "what u hear", "loopback", "monitor", "mix"];
   return (
@@ -4285,44 +4387,38 @@ ${input.summaryMarkdown}
 function buildMeetingSourceNote(input: {
   title: string;
   startedAt: Date;
-  recordingStatus: "in progress" | "completed";
-  recordingSourceRequested: string;
-  recordingSourceUsed: string;
-  microphoneInputDeviceLabel: string;
-  computerAudioInputDeviceLabel: string;
 }): string {
-  return `# ${input.title}
+  return `---
+type: meeting
+created: ${formatDate(input.startedAt)}
+date: ${formatLocalDateTime(input.startedAt)}
+org:
+location: ""
+tags:
+  - meeting
+---
 
-Date: ${formatIsoTimestamp(input.startedAt)}
-Recording status: ${input.recordingStatus}
-recording_source_requested: ${input.recordingSourceRequested}
-recording_source_used: ${input.recordingSourceUsed}
-microphone_input_device_label: ${input.microphoneInputDeviceLabel}
-computer_audio_input_device_label: ${input.computerAudioInputDeviceLabel}
+## Notes
 
-## Notes manuelles
 
+## Résumé
+- 
+
+## Actions
+- 
+
+## Personnes rencontrées
+- [[ ]]
+- [[ ]]
 `;
 }
-
 function markMeetingSourceNoteCompleted(currentContent: string, audioLink: string): string {
-  const updatedStatus = currentContent.includes("Recording status: in progress")
-    ? currentContent.replace("Recording status: in progress", "Recording status: completed")
-    : `${currentContent.trimEnd()}\nRecording status: completed\n`;
-
-  if (updatedStatus.includes("Audio file:")) {
-    return updatedStatus;
+  if (currentContent.includes("Audio file:")) {
+    return currentContent;
   }
 
   const insertion = `Audio file: [[${audioLink}]]`;
-  const lines = updatedStatus.split("\n");
-  const statusIndex = lines.findIndex((line) => line.startsWith("Recording status:"));
-  if (statusIndex >= 0) {
-    lines.splice(statusIndex + 1, 0, insertion);
-    return `${lines.join("\n").trimEnd()}\n`;
-  }
-
-  return `${updatedStatus.trimEnd()}\n${insertion}\n`;
+  return `${currentContent.trimEnd()}\n\n${insertion}\n`;
 }
 
 function buildMeetingNote(input: {

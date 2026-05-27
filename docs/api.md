@@ -210,6 +210,13 @@ Required scope: `vault:search`
 
 Uses PostgreSQL + pgvector in production, then applies a small keyword bonus for exact terms in `path`, `title`, `heading_path`, `content`, and tags. The base vector score is derived from cosine distance (`score = 1 - distance`) using pgvector's `<=>` operator. Returns bounded snippets only, never full notes.
 
+Result diagnostics are safe to display in the plugin:
+
+- `score`: final score after vector score and keyword bonus
+- `vector_score`: base semantic score
+- `keyword_bonus`: exact-match bonus
+- `matched_terms`: exact terms found in path, title, heading, tags, or snippet content
+
 ```bash
 curl -X POST "$API_BASE_URL/v1/vault/search" \
   -H "Authorization: Bearer $TOKEN" \
@@ -247,7 +254,10 @@ The gateway searches indexed chunks through the same pgvector search layer as `/
       "title": "Note Compagnon",
       "heading_path": "Architecture > RAG",
       "chunk_index": 2,
-      "score": 0.82
+      "score": 0.82,
+      "vector_score": 0.72,
+      "keyword_bonus": 0.10,
+      "matched_terms": ["couchdb", "livesync"]
     }
   ]
 }
@@ -264,6 +274,11 @@ Set `debug=true` to return safe search diagnostics without full note content:
     "selected_sources_count": 3,
     "min_score": 0.15,
     "top_scores": [0.82, 0.61],
+    "top_vector_scores": [0.72, 0.58],
+    "top_keyword_bonuses": [0.10, 0.03],
+    "matched_terms_by_path": {
+      "Projects/Note Compagnon.md": ["couchdb", "livesync"]
+    },
     "selected_paths": ["Projects/Note Compagnon.md"]
   }
 }

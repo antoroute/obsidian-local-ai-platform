@@ -522,6 +522,20 @@ def test_meeting_generate_from_job_rejects_invalid_result_json(client: TestClien
     assert response.json() == {"detail": "Stored transcript result is invalid."}
 
 
+def test_meeting_generate_from_job_rejects_empty_transcript_result(client: TestClient) -> None:
+    token = create_token(["meetings:generate"], user_id="user-empty-transcript")
+    job_id = create_completed_audio_job(user_id="user-empty-transcript", transcript_text="")
+
+    response = client.post(
+        "/v1/meetings/generate-from-job",
+        headers=create_bearer_header(token),
+        json=valid_generate_from_job_payload(job_id),
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Stored transcript result is empty. The audio may contain no detectable speech."}
+
+
 def test_meeting_generate_from_job_rejects_forbidden_model(client: TestClient) -> None:
     token = create_token(["meetings:generate"], user_id="user-model-forbidden")
     job_id = create_completed_audio_job(user_id="user-model-forbidden")

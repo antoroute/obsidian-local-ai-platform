@@ -401,6 +401,9 @@ async def vault_search(
                 heading_path=hit.chunk.heading_path,
                 snippet=make_snippet(hit.chunk.content),
                 score=round(hit.score, 6),
+                vector_score=round(hit.vector_score, 6),
+                keyword_bonus=round(hit.keyword_bonus, 6),
+                matched_terms=hit.matched_terms,
                 chunk_index=hit.chunk.chunk_index,
             )
             for hit in hits
@@ -448,6 +451,9 @@ async def vault_ask(
             heading_path=hit.chunk.heading_path,
             chunk_index=hit.chunk.chunk_index,
             score=round(hit.score, 6),
+            vector_score=round(hit.vector_score, 6),
+            keyword_bonus=round(hit.keyword_bonus, 6),
+            matched_terms=hit.matched_terms,
         )
         for hit in hits
     ]
@@ -549,7 +555,10 @@ def build_vault_debug_info(hits, settings) -> dict[str, object]:
         "selected_sources_count": len(hits),
         "min_score": settings.rag_min_score,
         "top_scores": [round(hit.score, 6) for hit in hits[:10]],
+        "top_vector_scores": [round(hit.vector_score, 6) for hit in hits[:10]],
+        "top_keyword_bonuses": [round(hit.keyword_bonus, 6) for hit in hits[:10]],
         "selected_paths": [hit.document.path for hit in hits],
+        "matched_terms_by_path": {hit.document.path: hit.matched_terms for hit in hits[:10]},
     }
 
 

@@ -8,6 +8,7 @@ TranscriptionLanguage = Literal["auto", "fr", "en"]
 AssistantMode = Literal["chat", "correct", "rewrite", "summarize"]
 AssistantOutputLanguage = Literal["same_as_input", "fr", "en"]
 AssistantResponseStyle = Literal["direct", "detailed"]
+AssistantActionPreset = Literal["professional"]
 VaultAnswerLanguage = Literal["same_as_input", "fr", "en"]
 
 
@@ -117,6 +118,7 @@ class AssistantChatRequest(BaseModel):
     mode: AssistantMode = "chat"
     output_language: AssistantOutputLanguage = "same_as_input"
     response_style: AssistantResponseStyle | None = None
+    action_preset: AssistantActionPreset | None = None
     model: str | None = None
 
 
@@ -167,6 +169,9 @@ class VaultSearchResult(BaseModel):
     heading_path: str | None
     snippet: str
     score: float
+    vector_score: float | None = None
+    keyword_bonus: float | None = None
+    matched_terms: list[str] = Field(default_factory=list)
     chunk_index: int
 
 
@@ -193,6 +198,9 @@ class VaultSourceResponse(BaseModel):
     heading_path: str | None
     chunk_index: int
     score: float
+    vector_score: float | None = None
+    keyword_bonus: float | None = None
+    matched_terms: list[str] = Field(default_factory=list)
 
 
 class VaultAskResponse(BaseModel):

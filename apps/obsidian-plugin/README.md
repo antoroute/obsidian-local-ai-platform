@@ -86,6 +86,7 @@ The dashboard has an explicit `Mode de reponse` selector:
 3. `Avec le vault`
    - calls `POST /v1/vault/ask`
    - uses the RAG index and displays sources
+   - displays safe RAG diagnostics when available: vector score, keyword bonus, matched terms, and selected paths
    - does not send the full current note
 
 For chat, `Output language = same_as_meeting` maps to `same_as_input`, so a French question should receive a French answer and an English question should receive an English answer unless you explicitly force French or English.
@@ -142,7 +143,7 @@ Security model:
 
 When using `Avec le vault`, Note Compagnon renders the answer as Markdown and shows sources. If a source path exists locally, clicking it opens the note. If no source is returned, the dashboard suggests indexing the vault or reformulating the question.
 
-Use `Tester la recherche RAG` when an answer seems weak. It displays the retrieved paths, snippets and scores before the LLM writes an answer, which helps distinguish an indexing problem from a generation problem.
+Use `Tester la recherche RAG` when an answer seems weak. It displays the retrieved paths, snippets, final score, vector score, keyword bonus and matched terms before the LLM writes an answer, which helps distinguish an indexing problem from a retrieval or generation problem. If no chunk appears, check that the vault was indexed with the same `Workspace RAG`, that the note is not excluded by folder/tag/frontmatter, and try exact keywords such as `CouchDB LiveSync HTTPS`.
 
 If several generated tokens created separate RAG spaces, use a full/admin token, run `Reinitialiser tout l'index du vault`, then reindex once with `Workspace RAG = default`.
 
@@ -168,6 +169,7 @@ Command palette and editor context menu actions:
 
 - `Note Compagnon: Correct selected text`
 - `Note Compagnon: Rewrite selected text`
+- `Note Compagnon: Reecrire plus professionnel`
 - `Note Compagnon: Summarize selected text`
 
 For `correct`, `rewrite`, and `summarize`, the plugin requests a direct response and shows a preview with:
@@ -178,6 +180,8 @@ For `correct`, `rewrite`, and `summarize`, the plugin requests a direct response
 - `Annuler`
 
 Quick actions use `same_as_input` by default, so French selected text stays French and English selected text stays English. You can force French or English in `Quick actions language`.
+
+`Reecrire plus professionnel` is the enterprise preset. It keeps the same language, preserves the meaning, improves tone and clarity, avoids unnecessary length, and returns only the final text. It does not turn a short sentence into a full email unless the selected text already looks like an email.
 
 ## Templates
 

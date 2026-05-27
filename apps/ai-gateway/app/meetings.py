@@ -235,8 +235,8 @@ def extract_transcript_text_from_result(result_payload: dict[str, object]) -> st
     transcript = transcript.strip()
     if not transcript:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Stored transcript result is empty.",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Stored transcript result is empty. The audio may contain no detectable speech.",
         )
     return transcript
 

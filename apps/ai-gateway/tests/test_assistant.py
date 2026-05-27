@@ -105,7 +105,7 @@ def test_assistant_chat_same_as_input_uses_input_language_instruction_fr(client:
 
     assert response.status_code == 200
     assert "same_as_input: detect the main language" in fake_client.system_prompts[0]
-    assert "French input must receive French output" in fake_client.system_prompts[0]
+    assert "French text must receive French output" in fake_client.system_prompts[0]
 
 
 def test_assistant_chat_same_as_input_uses_input_language_instruction_en(client: TestClient) -> None:
@@ -122,7 +122,7 @@ def test_assistant_chat_same_as_input_uses_input_language_instruction_en(client:
     app.dependency_overrides.clear()
 
     assert response.status_code == 200
-    assert "English input must receive English output" in fake_client.system_prompts[0]
+    assert "English text must receive English output" in fake_client.system_prompts[0]
 
 
 def test_assistant_chat_accepts_correct_with_context(client: TestClient) -> None:
@@ -141,8 +141,9 @@ def test_assistant_chat_accepts_correct_with_context(client: TestClient) -> None
     assert response.status_code == 200
     assert response.json()["mode"] == "correct"
     assert "Return only the corrected text" in fake_client.system_prompts[0]
-    assert "Keep the same language as the input" in fake_client.system_prompts[0]
+    assert "Keep the same language as the text to process" in fake_client.system_prompts[0]
     assert "Do not translate unless explicitly forced" in fake_client.system_prompts[0]
+    assert "detect the main language of the TEXT block" in fake_client.user_prompts[0]
 
 
 def test_assistant_chat_accepts_rewrite_with_context(client: TestClient) -> None:
@@ -161,7 +162,52 @@ def test_assistant_chat_accepts_rewrite_with_context(client: TestClient) -> None
     assert response.status_code == 200
     assert response.json()["mode"] == "rewrite"
     assert "Response style: direct" in fake_client.system_prompts[0]
-    assert "Keep the same language as the input" in fake_client.system_prompts[0]
+    assert "Keep the same language as the text to process" in fake_client.system_prompts[0]
+    assert "Text to process:" in fake_client.user_prompts[0]
+    assert "Texte trop brut." in fake_client.user_prompts[0]
+
+
+def test_assistant_rewrite_professional_instruction_stays_direct(client: TestClient) -> None:
+    fake_client = FakeAssistantClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["assistant:chat"])
+
+    response = client.post(
+        "/v1/assistant/chat",
+        headers=create_bearer_header(token),
+        json=valid_payload(
+            message="",
+            mode="rewrite",
+            context="salut on fait comme on peut pour le client",
+            output_language="same_as_input",
+            response_style="direct",
+            action_preset="professional",
+        ),
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "Professional rewrite preset" in fake_client.system_prompts[0]
+    assert "Keep the same language as the text to process" in fake_client.system_prompts[0]
+    assert "Return only the final usable result" in fake_client.system_prompts[0]
+    assert "Apply the professional rewrite preset" in fake_client.user_prompts[0]
+    assert "style plus professionnel" not in fake_client.user_prompts[0]
+    assert "salut on fait comme on peut pour le client" in fake_client.user_prompts[0]
+    assert "French text must receive French output" in fake_client.system_prompts[0]
+
+
+def test_assistant_rejects_professional_preset_outside_rewrite(client: TestClient) -> None:
+    token = create_token(["assistant:chat"])
+
+    response = client.post(
+        "/v1/assistant/chat",
+        headers=create_bearer_header(token),
+        json=valid_payload(message="", mode="correct", context="je sui pret", action_preset="professional"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "action_preset=professional is only supported for rewrite mode."
 
 
 def test_assistant_chat_summarize_requests_no_intro(client: TestClient) -> None:
@@ -172,14 +218,15 @@ def test_assistant_chat_summarize_requests_no_intro(client: TestClient) -> None:
     response = client.post(
         "/v1/assistant/chat",
         headers=create_bearer_header(token),
-        json=valid_payload(message="", mode="summarize", context="Long texte a resumer."),
+        json=valid_payload(message="", mode="summarize", context="Long texte a resumer.", output_language="same_as_input"),
     )
 
     app.dependency_overrides.clear()
 
     assert response.status_code == 200
     assert "Do not add an introduction" in fake_client.system_prompts[0]
-    assert "Use the main language of the input" in fake_client.system_prompts[0]
+    assert "Use the main language of the text to process" in fake_client.system_prompts[0]
+    assert "French text must receive French output" in fake_client.system_prompts[0]
 
 
 def test_assistant_chat_output_language_en_forces_english(client: TestClient) -> None:

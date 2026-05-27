@@ -5,7 +5,7 @@ import logging
 import math
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from fastapi import HTTPException, status
@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 RAG_SYSTEM_PROMPT = """You are Note Compagnon in vault RAG mode.
 Answer only from the provided retrieved sources.
 If the sources are insufficient, say clearly that the available notes do not contain enough information.
+If the sources are weak but non-empty, answer cautiously and mention that confidence is limited.
 Do not complete the answer with unsupported assumptions.
 Do not claim that you read the whole vault.
 Do not use notes that are not present in the retrieved context.
@@ -44,6 +45,7 @@ class SearchHit:
     score: float
     vector_score: float = 0.0
     keyword_bonus: float = 0.0
+    matched_terms: list[str] = field(default_factory=list)
 
 
 def ensure_rag_enabled(settings: Settings) -> None:
@@ -118,7 +120,8 @@ async def index_note(
 
     chunks = split_markdown_chunks(payload.content, chunk_size=settings.rag_chunk_size, chunk_overlap=settings.rag_chunk_overlap)
     for chunk in chunks:
-        embedding = validate_embedding_dimension(await embed_text(chunk.content), settings)
+        embedding_text = build_chunk_embedding_text(payload, chunk)
+        embedding = validate_embedding_dimension(await embed_text(embedding_text), settings)
         session.add(
             VaultChunk(
                 id=str(uuid.uuid4()),
@@ -154,13 +157,15 @@ async def search_vault(
     ensure_rag_enabled(settings)
     ensure_vector_backend_allowed(session, settings)
     top_k = normalize_top_k(payload.top_k, settings)
-    query_embedding = validate_embedding_dimension(await embed_text(payload.query), settings)
+    search_query = build_enriched_search_query(payload)
+    query_embedding = validate_embedding_dimension(await embed_text(search_query), settings)
     if settings.rag_vector_backend == "pgvector":
         return search_vault_pgvector(
             session,
             user_id=user_id,
             workspace_id=workspace_id,
             payload=payload,
+            search_query=search_query,
             query_embedding=query_embedding,
             top_k=top_k,
             settings=settings,
@@ -179,9 +184,9 @@ async def search_vault(
         if tag_filter and not tag_filter.issubset(set(load_json_list(document.tags_json))):
             continue
         vector_score = cosine_similarity(query_embedding, load_embedding(chunk.embedding))
-        score, keyword_bonus = apply_hybrid_score(vector_score, payload.query, chunk, document, settings)
+        score, keyword_bonus, matched_terms = apply_hybrid_score(vector_score, search_query, chunk, document, settings)
         if score >= settings.rag_min_score:
-            hits.append(SearchHit(chunk=chunk, document=document, score=score, vector_score=vector_score, keyword_bonus=keyword_bonus))
+            hits.append(SearchHit(chunk=chunk, document=document, score=score, vector_score=vector_score, keyword_bonus=keyword_bonus, matched_terms=matched_terms))
     hits.sort(key=lambda hit: hit.score, reverse=True)
     return hits[:top_k]
 
@@ -192,6 +197,7 @@ def search_vault_pgvector(
     user_id: str,
     workspace_id: str,
     payload: VaultSearchRequest,
+    search_query: str,
     query_embedding: list[float],
     top_k: int,
     settings: Settings,
@@ -230,8 +236,8 @@ def search_vault_pgvector(
         if tag_filter and not tag_filter.issubset(set(load_json_list(document.tags_json))):
             continue
         vector_score = float(row["score"] or 0.0)
-        score, keyword_bonus = apply_hybrid_score(vector_score, payload.query, chunk, document, settings)
-        hits.append(SearchHit(chunk=chunk, document=document, score=score, vector_score=vector_score, keyword_bonus=keyword_bonus))
+        score, keyword_bonus, matched_terms = apply_hybrid_score(vector_score, search_query, chunk, document, settings)
+        hits.append(SearchHit(chunk=chunk, document=document, score=score, vector_score=vector_score, keyword_bonus=keyword_bonus, matched_terms=matched_terms))
     hits.sort(key=lambda hit: hit.score, reverse=True)
     filtered = [hit for hit in hits if hit.score >= settings.rag_min_score]
     selected = (filtered or hits)[:top_k]
@@ -249,32 +255,38 @@ def search_vault_pgvector(
     return selected
 
 
-def apply_hybrid_score(vector_score: float, query: str, chunk: VaultChunk, document: VaultDocument, settings: Settings) -> tuple[float, float]:
+def apply_hybrid_score(vector_score: float, query: str, chunk: VaultChunk, document: VaultDocument, settings: Settings) -> tuple[float, float, list[str]]:
     if not settings.rag_keyword_bonus_enabled:
-        return vector_score, 0.0
+        return vector_score, 0.0, []
     terms = extract_keyword_terms(query)
     if not terms:
-        return vector_score, 0.0
+        return vector_score, 0.0, []
     path = document.path.lower()
     title = (document.title or "").lower()
     heading = (chunk.heading_path or "").lower()
     content = chunk.content.lower()
     tags = " ".join(load_json_list(document.tags_json)).lower()
     bonus = 0.0
+    matched_terms: list[str] = []
     for term in terms:
         normalized = term.lower()
         if normalized in content:
-            bonus += 0.03
+            bonus += 0.04
+            matched_terms.append(normalized)
         if normalized in heading:
-            bonus += 0.04
-        if normalized in title:
             bonus += 0.06
+            matched_terms.append(normalized)
+        if normalized in title:
+            bonus += 0.08
+            matched_terms.append(normalized)
         if normalized in path:
-            bonus += 0.05
+            bonus += 0.06
+            matched_terms.append(normalized)
         if normalized in tags:
-            bonus += 0.04
+            bonus += 0.06
+            matched_terms.append(normalized)
     bounded_bonus = min(settings.rag_keyword_bonus_max, bonus)
-    return vector_score + bounded_bonus, bounded_bonus
+    return vector_score + bounded_bonus, bounded_bonus, sorted(set(matched_terms))
 
 
 def extract_keyword_terms(query: str) -> list[str]:
@@ -291,11 +303,54 @@ def extract_keyword_terms(query: str) -> list[str]:
     return terms
 
 
+def build_enriched_search_query(payload: VaultSearchRequest) -> str:
+    parts = [payload.query]
+    if payload.path_prefix:
+        parts.extend(payload.path_prefix.replace("/", " ").replace("\\", " ").split())
+    parts.extend(payload.tags)
+    return " ".join(part for part in parts if part).strip()
+
+
+def build_chunk_embedding_text(payload: VaultIndexNoteRequest, chunk) -> str:
+    metadata_lines = [
+        f"Title: {payload.title or ''}",
+        f"Path: {payload.path}",
+    ]
+    if chunk.heading_path:
+        metadata_lines.append(f"Heading: {chunk.heading_path}")
+    if payload.tags:
+        metadata_lines.append(f"Tags: {', '.join(payload.tags)}")
+    frontmatter_summary = format_frontmatter_for_embedding(payload.frontmatter)
+    if frontmatter_summary:
+        metadata_lines.append(f"Frontmatter: {frontmatter_summary}")
+    return "\n".join(metadata_lines + ["", chunk.content])
+
+
+def format_frontmatter_for_embedding(frontmatter: dict[str, object]) -> str:
+    parts: list[str] = []
+    for key, value in frontmatter.items():
+        if value is None or isinstance(value, dict):
+            continue
+        if isinstance(value, list):
+            simple_values = [str(item) for item in value if isinstance(item, str | int | float | bool)]
+            if simple_values:
+                parts.append(f"{key}={', '.join(simple_values[:8])}")
+        elif isinstance(value, str | int | float | bool):
+            parts.append(f"{key}={value}")
+    summary = "; ".join(parts)
+    return summary[:1000]
+
+
 def build_vault_answer_prompt(*, question: str, hits: list[SearchHit], settings: Settings, answer_language: str) -> tuple[str, str]:
     context_parts: list[str] = []
     used_chars = 0
     for index, hit in enumerate(hits, start=1):
-        source_header = f"[Source {index}] path={hit.document.path} title={hit.document.title or ''} heading={hit.chunk.heading_path or ''} score={hit.score:.3f}"
+        matched = ",".join(hit.matched_terms[:12])
+        source_header = (
+            f"[Source {index}] path={hit.document.path} title={hit.document.title or ''} "
+            f"heading={hit.chunk.heading_path or ''} score={hit.score:.3f} "
+            f"vector_score={hit.vector_score:.3f} keyword_bonus={hit.keyword_bonus:.3f} matched_terms={matched}"
+        )
         block = f"{source_header}\n{hit.chunk.content.strip()}"
         if used_chars + len(block) > settings.rag_max_context_chars:
             remaining = settings.rag_max_context_chars - used_chars
@@ -314,7 +369,7 @@ def build_vault_answer_prompt(*, question: str, hits: list[SearchHit], settings:
         f"answer_language={answer_language}\n"
         f"{language_instruction}\n\n"
         f"Question:\n{question}\n\n"
-        "Retrieved vault sources:\n"
+        "Retrieved vault sources. Use stronger wording only when scores and exact matches support it; otherwise mention limited confidence:\n"
         f"{chr(10).join(context_parts) if context_parts else '(no source above the relevance threshold)'}"
     )
     return RAG_SYSTEM_PROMPT, user_prompt
@@ -323,7 +378,7 @@ def build_vault_answer_prompt(*, question: str, hits: list[SearchHit], settings:
 def build_insufficient_sources_answer(hits: list[SearchHit]) -> str:
     if not hits:
         return "## Reponse\n\nLes notes disponibles ne contiennent pas assez d'informations pour repondre de maniere fiable.\n\n## Sources utilisees\n\n- Aucune source pertinente trouvee."
-    return "## Reponse\n\nLes sources retrouvees sont trop faibles ou insuffisantes pour repondre sans supposition.\n\n## Sources utilisees\n" + "\n".join(
+    return "## Reponse\n\nD'apres les sources retrouvees, mais avec une confiance limitee, il n'y a pas assez d'informations pour repondre sans supposition.\n\n## Sources utilisees\n" + "\n".join(
         f"- [[{hit.document.path}]]" for hit in hits
     )
 

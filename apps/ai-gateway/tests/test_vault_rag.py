@@ -154,6 +154,32 @@ def test_search_returns_mocked_results(client: TestClient) -> None:
     assert payload["results"]
     assert payload["results"][0]["path"] == "Projects/RAG.md"
     assert len(payload["results"][0]["snippet"]) <= 320
+    assert payload["results"][0]["vector_score"] is not None
+    assert payload["results"][0]["keyword_bonus"] > 0
+    assert "couchdb" in payload["results"][0]["matched_terms"]
+
+
+def test_search_exact_keywords_boost_relevant_note(client: TestClient) -> None:
+    app.dependency_overrides[get_embedding_client] = lambda: FakeEmbeddingClient()
+    index_token = create_token(["vault:index"], user_id="keyword-user")
+    search_token = create_token(["vault:search"], user_id="keyword-user")
+    client.post(
+        "/v1/vault/index-note",
+        headers=bearer(index_token),
+        json=index_payload("# Test RAG CouchDB\n\nCouchDB LiveSync Nginx Proxy Manager E2EE obsidian_livesync."),
+    )
+
+    response = client.post(
+        "/v1/vault/search",
+        headers=bearer(search_token),
+        json={"vault_id": "default", "query": "CouchDB LiveSync HTTPS obsidian_livesync", "top_k": 8},
+    )
+
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["path"] == "Projects/RAG.md"
+    assert result["keyword_bonus"] > 0
+    assert {"couchdb", "livesync", "obsidian_livesync"}.issubset(set(result["matched_terms"]))
 
 
 def test_ask_requires_vault_ask_scope(client: TestClient) -> None:
@@ -194,6 +220,9 @@ def test_ask_debug_returns_safe_metadata_without_note_content(client: TestClient
     debug_info = response.json()["debug_info"]
     assert debug_info["selected_sources_count"] >= 1
     assert debug_info["selected_paths"] == ["Projects/RAG.md"]
+    assert debug_info["top_vector_scores"]
+    assert debug_info["top_keyword_bonuses"]
+    assert debug_info["matched_terms_by_path"]["Projects/RAG.md"]
     assert "Secret-ish" not in str(debug_info)
 
 
