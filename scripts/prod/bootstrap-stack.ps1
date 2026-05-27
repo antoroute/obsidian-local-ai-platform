@@ -2,7 +2,7 @@ param(
     [ValidateSet("gpu", "cpu")]
     [string]$Mode = "gpu",
     [switch]$ResetModelCaches,
-    [string]$OllamaModels = "mistral:latest,nomic-embed-text:latest",
+    [string]$OllamaModels = "qwen2.5:7b,mistral:latest,nomic-embed-text:latest",
     [ValidateSet("small", "medium", "large-v3")]
     [string]$WhisperModel = "medium",
     [switch]$SkipWhisper,
@@ -105,7 +105,7 @@ try {
     Write-Host ""
     Write-Host "Bootstrap complete." -ForegroundColor Green
     Write-Host "API Base URL for local reverse-proxy testing: http://127.0.0.1:8000"
-    Write-Host "Default model: mistral:latest"
+    Write-Host "Default model: qwen2.5:7b"
     Write-Host ""
     Write-Host "Create a full Note Compagnon token with:" -ForegroundColor Yellow
     Write-Host ".\scripts\prod\create-token-full.ps1 -Mode $Mode -Name note-compagnon-full" -ForegroundColor Yellow

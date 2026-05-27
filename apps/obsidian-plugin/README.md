@@ -203,6 +203,10 @@ The dashboard installer offers:
 
 Existing templates are skipped and never overwritten automatically.
 
+Recommended meeting-summary templates are intentionally short. They guide the model toward a direct useful report with five core blocks: summary, decisions, actions, open points, and uncertainties. Empty sections should be removed by the model instead of filled with generic text such as "no information available".
+
+For small local models, prefer the default `Compte rendu direct` templates before adding long custom structures. Tables are avoided by default because compact bullet/pipe lines are usually more reliable with local models.
+
 Example templates are available in `apps/obsidian-plugin/examples/templates`, including:
 
 - `meeting-note-fr.md`

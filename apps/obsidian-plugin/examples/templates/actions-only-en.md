@@ -11,5 +11,4 @@ Do not invent owners or due dates.
 
 ## Actions
 
-| Action | Owner | Due date | Source / uncertainty |
-| --- | --- | --- | --- |
+- Action | Owner if known | Due date if known | Source or uncertainty

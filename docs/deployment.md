@@ -104,7 +104,8 @@ The runtime Ollama container should not need Internet access. The recommended pa
 
 Required default models:
 
-- LLM: `mistral:latest`
+- LLM: `qwen2.5:7b`
+- fallback/general LLM: `mistral:latest`
 - RAG embeddings: `nomic-embed-text:latest`
 - transcription: faster-whisper `medium`
 
@@ -112,11 +113,12 @@ Prepare the host model store if needed:
 
 ```powershell
 ollama list
+ollama pull qwen2.5:7b
 ollama pull mistral:latest
 ollama pull nomic-embed-text:latest
 ```
 
-`ollama list` on the host must show both `mistral:latest` and `nomic-embed-text:latest` before `-Source host` can copy them into Docker.
+`ollama list` on the host must show `qwen2.5:7b`, `mistral:latest`, and `nomic-embed-text:latest` before `-Source host` can copy them into Docker.
 
 Copy only those models into Docker Ollama:
 
@@ -124,7 +126,7 @@ Copy only those models into Docker Ollama:
 .\scripts\prod\prepare-ollama-models.ps1 `
   -Mode gpu `
   -Source host `
-  -Models "mistral:latest,nomic-embed-text:latest"
+  -Models "qwen2.5:7b,mistral:latest,nomic-embed-text:latest"
 ```
 
 This script reads `$env:USERPROFILE\.ollama\models`, copies only the selected model manifests and their referenced `sha256` blobs, restarts Docker Ollama, and verifies `ollama list` inside the container.
@@ -135,7 +137,7 @@ If you explicitly want Docker Ollama to pull models itself, use `-Source docker`
 .\scripts\prod\prepare-ollama-models.ps1 `
   -Mode gpu `
   -Source docker `
-  -Models "mistral:latest,nomic-embed-text:latest"
+  -Models "qwen2.5:7b,mistral:latest,nomic-embed-text:latest"
 ```
 
 Prepare faster-whisper:
@@ -149,7 +151,7 @@ One-command bootstrap for the normal GPU path:
 ```powershell
 .\scripts\prod\bootstrap-stack.ps1 `
   -Mode gpu `
-  -OllamaModels "mistral:latest,nomic-embed-text:latest" `
+  -OllamaModels "qwen2.5:7b,mistral:latest,nomic-embed-text:latest" `
   -WhisperModel medium
 ```
 
@@ -162,7 +164,7 @@ Clean bootstrap with model cache reset:
   -Mode gpu `
   -ResetModelCaches `
   -Force `
-  -OllamaModels "mistral:latest,nomic-embed-text:latest" `
+  -OllamaModels "qwen2.5:7b,mistral:latest,nomic-embed-text:latest" `
   -WhisperModel medium
 ```
 
@@ -381,7 +383,7 @@ Expected GPU values:
 
 - `API Base URL = https://ai.kavalek.fr` in production
 - `API Base URL = http://127.0.0.1:8000` for local testing
-- `Default model = mistral:latest`
+- `Default model = qwen2.5:7b`
 
 Create a token:
 
@@ -584,7 +586,8 @@ docker compose -f docker-compose.yml -f infra/docker-compose.dev.real-local.over
 
 Recommended local models:
 
-- LLM: `mistral:latest`
+- LLM: `qwen2.5:7b` for more faithful meeting reports on 8 GB GPUs
+- fallback/general LLM: `mistral:latest`
 - Whisper on RTX 3070: `medium`
 - Whisper on RTX 3090: `large-v3` is possible, `medium` is a good lower-latency default
 
@@ -592,8 +595,8 @@ Important variables in this mode:
 
 - `LLM_PROVIDER=ollama`
 - `OLLAMA_BASE_URL=http://host.docker.internal:11434`
-- `DEFAULT_MODEL=mistral:latest`
-- `ALLOWED_MODELS=qwen2.5:14b,mistral:latest,llama3:latest`
+- `DEFAULT_MODEL=qwen2.5:7b`
+- `ALLOWED_MODELS=qwen2.5:7b,mistral:latest,qwen2.5:14b,llama3:latest`
 - `TRANSCRIPTION_ENGINE=faster_whisper`
 - `WHISPER_MODEL_SIZE=medium`
 - `WHISPER_DEVICE=cuda`
@@ -611,7 +614,7 @@ cd apps/ai-gateway
 Configure Obsidian with:
 
 - `API Base URL = http://127.0.0.1:8000`
-- `Default model = mistral:latest`
+- `Default model = qwen2.5:7b`
 
 Expected path:
 
@@ -659,8 +662,8 @@ docker compose -f docker-compose.yml -f infra/docker-compose.dev.override.yml up
 The `ai-gateway` container is explicitly configured with:
 
 - `OLLAMA_BASE_URL=http://host.docker.internal:11434`
-- `DEFAULT_MODEL=mistral:latest`
-- `ALLOWED_MODELS=qwen2.5:14b,mistral:latest,llama3:latest`
+- `DEFAULT_MODEL=qwen2.5:7b`
+- `ALLOWED_MODELS=qwen2.5:7b,mistral:latest,qwen2.5:14b,llama3:latest`
 - a dedicated `host_access` bridge network
 - `extra_hosts: host.docker.internal:host-gateway`
 
@@ -866,6 +869,9 @@ Configured healthchecks:
 - `AUDIO_STORAGE_DIR` controls where uploaded audio and result JSON files are stored
 - `AUDIO_STORAGE_DIR` should stay `/data/audio` in Docker so the gateway and worker see the same files
 - `MAX_AUDIO_UPLOAD_MB` controls the maximum accepted audio file size
+- `MEETING_TRANSCRIPT_CLEANUP_ENABLED=true` normalizes transcripts before meeting generation by removing empty lines, exact repeated lines, and tiny filler-only lines
+- `MEETING_PREDIGEST_ENABLED=true` enables the controlled hybrid meeting pipeline for long transcripts
+- `MEETING_PREDIGEST_MIN_CHARS=12000` keeps short and medium meetings on a single LLM call, and uses one compact pre-digest call only beyond that threshold
 - `MAX_ASSISTANT_MESSAGE_CHARS` controls the maximum assistant chat instruction size
 - `MAX_ASSISTANT_CONTEXT_CHARS` controls the maximum selected text or note context size sent to the assistant endpoint
 - `TRANSCRIPTION_ENGINE` selects `fake` or `faster_whisper`; production-like stacks must use `faster_whisper`
@@ -875,6 +881,7 @@ Configured healthchecks:
 - `WHISPER_LANGUAGE` is an optional global fallback for direct worker checks; normal audio jobs carry per-job language metadata
 - audio clients can now request per-job transcription language with `transcription_language=auto|fr|en`; `auto` does not force a faster-whisper language
 - meeting generation clients can request `output_language=same_as_meeting|fr|en`; this changes the prompt instruction only
+- meeting prompts are optimized for local models: direct useful output, no empty template sections, no generic filler, and action items in the simple form `Action | Owner | Due date`
 - `WHISPER_BEAM_SIZE` controls beam search width
 - `WHISPER_MODEL_CACHE_DIR`, `HF_HOME`, and `HUGGINGFACE_HUB_CACHE` should point to the persistent model cache volume in Docker
 - TLS certificate management for public Internet exposure is a later step; Traefik is already positioned as the only public entrypoint

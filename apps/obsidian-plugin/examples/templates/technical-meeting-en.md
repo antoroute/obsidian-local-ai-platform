@@ -6,21 +6,19 @@ description: Technical meeting minutes with architecture, decisions, actions, an
 ---
 # Technical meeting minutes
 
+Goal: direct and actionable technical meeting minutes.
+Remove any section without useful supported information.
+Do not invent decisions, components, owners, or due dates.
+
 ## Executive summary
-
-## Technical context
-
-## Architecture / components
 
 ## Technical decisions
 
-| Decision | Rationale | Impact |
-| --- | --- | --- |
+- Decision | Rationale if known | Impact if known
 
 ## Technical actions
 
-| Action | Owner | Due date |
-| --- | --- | --- |
+- Action | Owner if known | Due date if known
 
 ## Risks / technical debt
 

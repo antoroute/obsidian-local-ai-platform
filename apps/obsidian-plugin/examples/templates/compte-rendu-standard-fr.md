@@ -2,27 +2,22 @@
 name: Compte rendu standard
 language: fr
 type: meeting
-description: Compte rendu complet en francais avec decisions, actions et risques.
+description: Compte rendu direct en francais avec decisions, actions et incertitudes.
 ---
 # Compte rendu
 
+Objectif : produire un compte rendu compact et exploitable.
+Supprimer toute section sans information utile.
+Ne pas inventer de decision, responsable ou echeance.
+
 ## Resume executif
-
-## Participants
-
-## Sujets abordes
 
 ## Decisions prises
 
 ## Actions a suivre
 
-| Action | Responsable | Echeance |
-| --- | --- | --- |
+Action | Responsable si connu | Echeance si connue
 
 ## Points ouverts
 
-## Risques / blocages
-
 ## Incertitudes ou contradictions
-
-## Annexes / notes complementaires

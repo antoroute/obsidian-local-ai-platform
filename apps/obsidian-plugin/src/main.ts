@@ -80,7 +80,7 @@ tags: [meeting]
 name: Compte rendu de reunion
 language: fr
 type: meeting_summary
-description: Compte rendu complet avec decisions, actions et suggestions de notes liees.
+description: Compte rendu direct, compact et utile avec decisions, actions et incertitudes.
 ---
 ---
 type: meeting_summary
@@ -93,16 +93,13 @@ tags: [meeting, compte-rendu]
 ---
 # Compte rendu de reunion
 
+Objectif : produire un compte rendu direct, compact et utile.
 Respecter strictement les sources fournies. Ne pas inventer.
-Suggere les personnes, organisations, roles et topics a creer en notes separees, uniquement si les sources les mentionnent clairement.
+Supprimer toute section vide ou non utile.
+Si une decision ou action est incertaine, la mettre dans Incertitudes plutot que l'inventer.
+Actions au format simple : Action | Responsable si connu | Echeance si connue.
 
 ## Resume executif
-
-## Contexte
-
-## Participants / personnes mentionnees
-
-## Sujets abordes
 
 ## Decisions prises
 
@@ -110,13 +107,7 @@ Suggere les personnes, organisations, roles et topics a creer en notes separees,
 
 ## Points ouverts
 
-## Risques / blocages
-
 ## Incertitudes ou contradictions
-
-## Notes complementaires
-
-## Liens utiles
 `,
   },
   {
@@ -156,7 +147,7 @@ tags: [meeting]
 name: Meeting minutes
 language: en
 type: meeting_summary
-description: Full meeting minutes with decisions, actions, and linked-note suggestions.
+description: Direct, compact and useful meeting minutes with decisions, actions and uncertainties.
 ---
 ---
 type: meeting_summary
@@ -169,16 +160,13 @@ tags: [meeting, minutes]
 ---
 # Meeting minutes
 
+Goal: produce direct, compact and useful meeting minutes.
 Use only the provided sources. Do not invent.
-Suggest people, organizations, roles, and topics to create as separate notes only when clearly supported by the sources.
+Remove any empty or unhelpful section.
+If a decision or action is uncertain, put it under Uncertainties instead of inventing it.
+Actions format: Action | Owner if known | Due date if known.
 
 ## Executive summary
-
-## Context
-
-## Participants / mentioned people
-
-## Topics discussed
 
 ## Decisions made
 
@@ -186,13 +174,7 @@ Suggest people, organizations, roles, and topics to create as separate notes onl
 
 ## Open points
 
-## Risks / blockers
-
 ## Uncertainties or contradictions
-
-## Additional notes
-
-## Useful links
 `,
   },
   {
@@ -212,8 +194,7 @@ Ne pas inventer de responsable ou d'echeance.
 
 ## Actions
 
-| Action | Responsable | Echeance | Source / incertitude |
-| --- | --- | --- | --- |
+- Action | Responsable si connu | Echeance si connue | Source ou incertitude
 `,
   },
   {
@@ -233,28 +214,27 @@ Do not invent owners or due dates.
 
 ## Actions
 
-| Action | Owner | Due date | Source / uncertainty |
-| --- | --- | --- | --- |
+- Action | Owner if known | Due date if known | Source or uncertainty
 `,
   },
 ];
 const FALLBACK_TEMPLATE = `# Compte rendu
 
-## Resume executif
+Objectif : compte rendu direct, compact et utile.
+Supprimer les sections vides. Ne pas inventer.
+Si une decision ou action est incertaine, la placer dans Incertitudes.
 
-- 
+## Resume executif
 
 ## Decisions
 
-- 
-
 ## Actions a suivre
 
-- 
+Action | Responsable si connu | Echeance si connue
 
 ## Incertitudes
 
-- Signaler les points flous ou manquants.
+Signaler uniquement les points flous ou contradictoires.
 `;
 
 class UserFacingError extends Error {}
@@ -1100,6 +1080,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
   prepareTemplateForRequest(templateChoice: TemplateChoice): string {
     return [
+      buildMeetingGenerationIntent(templateChoice),
       templateChoice.templateContent.trim(),
       buildTranscriptionLanguageHint(this.getTranscriptionLanguage()),
       buildLanguageInstruction(this.getOutputLanguage()),
@@ -4045,6 +4026,35 @@ function buildLanguageInstruction(outputLanguage: PluginSettings["outputLanguage
     "## Language instruction",
     "Detect the main meeting language and answer in that language.",
     "If the source is bilingual, preserve proper nouns and acronyms without abusive translation.",
+  ].join("\n");
+}
+
+function buildMeetingGenerationIntent(templateChoice: TemplateChoice): string {
+  if (templateChoice.group === "actions") {
+    return [
+      "## Intention de generation",
+      "Mode : actions uniquement.",
+      "Retourner seulement les actions confirmees par les sources.",
+      "Ne pas ajouter de resume, contexte, decisions ou sections vides.",
+      "Format simple : Action | Responsable si connu | Echeance si connue.",
+    ].join("\n");
+  }
+  if (templateChoice.group === "technical") {
+    return [
+      "## Intention de generation",
+      "Mode : compte rendu technique direct.",
+      "Prioriser decisions techniques, actions techniques, risques, blocages et questions ouvertes.",
+      "Supprimer les sections sans information utile.",
+      "Ne pas inventer d'architecture, de responsable ou d'echeance.",
+    ].join("\n");
+  }
+  return [
+    "## Intention de generation",
+    "Mode : compte rendu direct.",
+    "Produire un compte rendu compact, utile et exploitable.",
+    "Blocs preferes : resume, decisions, actions, points ouverts, incertitudes.",
+    "Supprimer toute section vide ou non supportee par les sources.",
+    "Si une decision ou action n'est pas certaine, la mettre dans les incertitudes.",
   ].join("\n");
 }
 

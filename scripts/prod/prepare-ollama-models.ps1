@@ -1,5 +1,5 @@
 param(
-    [string]$Models = "mistral:latest,nomic-embed-text:latest",
+    [string]$Models = "qwen2.5:7b,mistral:latest,nomic-embed-text:latest",
     [ValidateSet("gpu", "cpu")]
     [string]$Mode = "gpu",
     [ValidateSet("host", "docker")]

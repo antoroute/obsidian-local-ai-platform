@@ -20,6 +20,7 @@ from app.jobs import (
     require_job_for_user,
 )
 from app.meetings import (
+    build_meeting_user_prompt_from_brief,
     extract_transcript_text_from_result,
     prepare_meeting_from_job_request,
     prepare_meeting_request,
@@ -221,15 +222,26 @@ async def generate_meeting_report(
     prepared_request = prepare_meeting_request(payload, get_settings())
 
     try:
+        user_prompt = prepared_request.user_prompt
+        if prepared_request.should_predigest:
+            brief = await llm_client.predigest_meeting(
+                model=prepared_request.selected_model,
+                title=prepared_request.title,
+                transcript_chars=prepared_request.transcript_chars,
+                manual_notes_chars=prepared_request.manual_notes_chars,
+                system_prompt=prepared_request.predigest_system_prompt,
+                user_prompt=prepared_request.predigest_user_prompt,
+            )
+            user_prompt = build_meeting_user_prompt_from_brief(prepared_request, brief.content)
         result = await llm_client.generate_meeting(
             model=prepared_request.selected_model,
             title=prepared_request.title,
             transcript_chars=prepared_request.transcript_chars,
             manual_notes_chars=prepared_request.manual_notes_chars,
             template_chars=prepared_request.template_chars,
-            participants=payload.participants,
+            participants=prepared_request.participants,
             system_prompt=prepared_request.system_prompt,
-            user_prompt=prepared_request.user_prompt,
+            user_prompt=user_prompt,
         )
     except OllamaUnavailableError as exc:
         raise HTTPException(
@@ -279,15 +291,26 @@ async def generate_meeting_report_from_job(
     prepared_request = prepare_meeting_from_job_request(payload, transcript=transcript_text, settings=get_settings())
 
     try:
+        user_prompt = prepared_request.user_prompt
+        if prepared_request.should_predigest:
+            brief = await llm_client.predigest_meeting(
+                model=prepared_request.selected_model,
+                title=prepared_request.title,
+                transcript_chars=prepared_request.transcript_chars,
+                manual_notes_chars=prepared_request.manual_notes_chars,
+                system_prompt=prepared_request.predigest_system_prompt,
+                user_prompt=prepared_request.predigest_user_prompt,
+            )
+            user_prompt = build_meeting_user_prompt_from_brief(prepared_request, brief.content)
         result = await llm_client.generate_meeting(
             model=prepared_request.selected_model,
             title=prepared_request.title,
             transcript_chars=prepared_request.transcript_chars,
             manual_notes_chars=prepared_request.manual_notes_chars,
             template_chars=prepared_request.template_chars,
-            participants=payload.participants,
+            participants=prepared_request.participants,
             system_prompt=prepared_request.system_prompt,
-            user_prompt=prepared_request.user_prompt,
+            user_prompt=user_prompt,
         )
     except OllamaUnavailableError as exc:
         raise HTTPException(

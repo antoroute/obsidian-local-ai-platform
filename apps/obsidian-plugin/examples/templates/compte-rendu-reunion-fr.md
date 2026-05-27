@@ -2,7 +2,7 @@
 name: Compte rendu de reunion
 language: fr
 type: meeting_summary
-description: Compte rendu complet avec decisions, actions et suggestions de notes liees.
+description: Compte rendu direct, compact et utile avec decisions, actions et incertitudes.
 ---
 ---
 type: meeting_summary
@@ -15,16 +15,13 @@ tags: [meeting, compte-rendu]
 ---
 # Compte rendu de reunion
 
+Objectif : produire un compte rendu direct, compact et utile.
 Respecter strictement les sources fournies. Ne pas inventer.
-Suggere les personnes, organisations, roles et topics a creer en notes separees, uniquement si les sources les mentionnent clairement.
+Supprimer toute section vide ou non utile.
+Si une decision ou action est incertaine, la mettre dans Incertitudes plutot que l'inventer.
+Actions au format simple : Action | Responsable si connu | Echeance si connue.
 
 ## Resume executif
-
-## Contexte
-
-## Participants / personnes mentionnees
-
-## Sujets abordes
 
 ## Decisions prises
 
@@ -32,10 +29,4 @@ Suggere les personnes, organisations, roles et topics a creer en notes separees,
 
 ## Points ouverts
 
-## Risques / blocages
-
 ## Incertitudes ou contradictions
-
-## Notes complementaires
-
-## Liens utiles

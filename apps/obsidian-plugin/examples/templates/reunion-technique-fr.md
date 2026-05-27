@@ -6,21 +6,19 @@ description: Compte rendu technique avec architecture, decisions et risques.
 ---
 # Compte rendu technique
 
+Objectif : compte rendu technique direct et exploitable.
+Supprimer toute section sans information utile.
+Ne pas inventer de decision, composant, responsable ou echeance.
+
 ## Resume executif
-
-## Contexte technique
-
-## Architecture / composants
 
 ## Decisions techniques
 
-| Decision | Raison | Impact |
-| --- | --- | --- |
+- Decision | Raison si connue | Impact si connu
 
 ## Actions techniques
 
-| Action | Responsable | Echeance |
-| --- | --- | --- |
+- Action | Responsable si connu | Echeance si connue
 
 ## Risques / dette technique
 

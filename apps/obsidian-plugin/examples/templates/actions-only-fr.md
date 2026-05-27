@@ -11,5 +11,4 @@ Ne pas inventer de responsable ou d'echeance.
 
 ## Actions
 
-| Action | Responsable | Echeance | Source / incertitude |
-| --- | --- | --- | --- |
+- Action | Responsable si connu | Echeance si connue | Source ou incertitude

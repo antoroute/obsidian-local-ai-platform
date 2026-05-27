@@ -25,6 +25,8 @@ class FakeMeetingOllamaClient:
         self.fail = fail
         self.system_prompts: list[str] = []
         self.user_prompts: list[str] = []
+        self.predigest_system_prompts: list[str] = []
+        self.predigest_user_prompts: list[str] = []
 
     async def generate_meeting(
         self,
@@ -46,12 +48,35 @@ class FakeMeetingOllamaClient:
         assert isinstance(participants, list)
         assert "Never invent facts" in system_prompt
         assert "Manual notes (priority source" in user_prompt
-        assert "Transcript (primary source" in user_prompt
+        assert "Transcript (primary source" in user_prompt or "Prepared meeting brief" in user_prompt
         self.system_prompts.append(system_prompt)
         self.user_prompts.append(user_prompt)
         if self.fail:
             raise OllamaUnavailableError("unavailable")
         return OllamaChatResult(model=model, content="## Resume executif\n\nCompte rendu mocke.")
+
+    async def predigest_meeting(
+        self,
+        *,
+        model: str,
+        title: str,
+        transcript_chars: int,
+        manual_notes_chars: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult:
+        assert model
+        assert title
+        assert transcript_chars >= 0
+        assert manual_notes_chars >= 0
+        assert "This is not the final report" in system_prompt
+        assert "Manual notes (priority source" in user_prompt
+        assert "Transcript (primary source" in user_prompt
+        self.predigest_system_prompts.append(system_prompt)
+        self.predigest_user_prompts.append(user_prompt)
+        if self.fail:
+            raise OllamaUnavailableError("unavailable")
+        return OllamaChatResult(model=model, content="## Brief\n\n- Decision candidate: conserver le budget.")
 
 
 def create_token(scopes: list[str], user_id: str | None = None) -> str:
@@ -148,7 +173,8 @@ def test_meeting_generate_rejects_missing_scope(client: TestClient) -> None:
 
 
 def test_meeting_generate_accepts_transcript_only(client: TestClient) -> None:
-    app.dependency_overrides[get_llm_client] = lambda: FakeMeetingOllamaClient()
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
     token = create_token(["meetings:generate"])
 
     response = client.post(
@@ -161,6 +187,49 @@ def test_meeting_generate_accepts_transcript_only(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json()["meeting_markdown"] == "## Resume executif\n\nCompte rendu mocke."
+    assert fake_client.predigest_user_prompts == []
+
+
+def test_meeting_generate_long_transcript_uses_predigest(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("MEETING_PREDIGEST_MIN_CHARS", "50")
+    get_settings.cache_clear()
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(transcript="Decision budget. " * 10),
+    )
+
+    app.dependency_overrides.clear()
+    get_settings.cache_clear()
+
+    assert response.status_code == 200
+    assert len(fake_client.predigest_user_prompts) == 1
+    assert "Prepared meeting brief" in fake_client.user_prompts[0]
+    assert "Decision candidate: conserver le budget" in fake_client.user_prompts[0]
+
+
+def test_meeting_generate_cleans_repeated_transcript_lines(client: TestClient) -> None:
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(transcript="Point budget.\n\nPoint budget.\nEuh\nDecision finale."),
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    prompt = fake_client.user_prompts[0]
+    assert prompt.count("Point budget.") == 1
+    assert "Euh" not in prompt
+    assert "Decision finale." in prompt
 
 
 def test_meeting_generate_accepts_manual_notes_only(client: TestClient) -> None:

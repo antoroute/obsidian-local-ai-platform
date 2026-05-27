@@ -2,7 +2,7 @@
 name: Meeting minutes
 language: en
 type: meeting_summary
-description: Full meeting minutes with decisions, actions, and linked-note suggestions.
+description: Direct, compact and useful meeting minutes with decisions, actions and uncertainties.
 ---
 ---
 type: meeting_summary
@@ -15,16 +15,13 @@ tags: [meeting, minutes]
 ---
 # Meeting minutes
 
+Goal: produce direct, compact and useful meeting minutes.
 Use only the provided sources. Do not invent.
-Suggest people, organizations, roles, and topics to create as separate notes only when clearly supported by the sources.
+Remove any empty or unhelpful section.
+If a decision or action is uncertain, put it under Uncertainties instead of inventing it.
+Actions format: Action | Owner if known | Due date if known.
 
 ## Executive summary
-
-## Context
-
-## Participants / mentioned people
-
-## Topics discussed
 
 ## Decisions made
 
@@ -32,10 +29,4 @@ Suggest people, organizations, roles, and topics to create as separate notes onl
 
 ## Open points
 
-## Risks / blockers
-
 ## Uncertainties or contradictions
-
-## Additional notes
-
-## Useful links

@@ -31,6 +31,17 @@ class LlmClient(Protocol):
         user_prompt: str,
     ) -> OllamaChatResult: ...
 
+    async def predigest_meeting(
+        self,
+        *,
+        model: str,
+        title: str,
+        transcript_chars: int,
+        manual_notes_chars: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult: ...
+
     async def assistant_chat(
         self,
         *,
@@ -113,6 +124,29 @@ class FakeLlmClient:
         )
         return OllamaChatResult(model=model, content=content)
 
+    async def predigest_meeting(
+        self,
+        *,
+        model: str,
+        title: str,
+        transcript_chars: int,
+        manual_notes_chars: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult:
+        del system_prompt, user_prompt
+        content = (
+            "# Brief de reunion fake\n"
+            f"- Titre : {title}\n"
+            f"- Longueur transcript : {transcript_chars} caracteres\n"
+            f"- Longueur notes manuelles : {manual_notes_chars} caracteres\n"
+            "- Themes : pipeline de generation\n"
+            "- Decisions candidates : decision fake\n"
+            "- Actions candidates : verifier la note finale\n"
+            "- Incertitudes : brief fake\n"
+        )
+        return OllamaChatResult(model=model, content=content)
+
     async def assistant_chat(
         self,
         *,
@@ -190,6 +224,23 @@ class OllamaLlmClient:
         user_prompt: str,
     ) -> OllamaChatResult:
         del title, transcript_chars, manual_notes_chars, template_chars, participants
+        return await self.ollama_client.summarize_markdown(
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+
+    async def predigest_meeting(
+        self,
+        *,
+        model: str,
+        title: str,
+        transcript_chars: int,
+        manual_notes_chars: int,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult:
+        del title, transcript_chars, manual_notes_chars
         return await self.ollama_client.summarize_markdown(
             model=model,
             system_prompt=system_prompt,

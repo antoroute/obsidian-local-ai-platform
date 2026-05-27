@@ -213,16 +213,17 @@ try {
     }
     Write-Host "OK Gateway OLLAMA_BASE_URL=http://ollama:11434" -ForegroundColor Green
 
-    Write-Host "Checking Ollama from ai-gateway..." -ForegroundColor Cyan
-    docker compose @composeFiles exec ai-gateway python -m app.cli check-ollama --model mistral:latest
+    $defaultModel = Get-GatewayEnv -ComposeFiles $composeFiles -Name "DEFAULT_MODEL"
+    Write-Host "Checking Ollama from ai-gateway with DEFAULT_MODEL=$defaultModel..." -ForegroundColor Cyan
+    docker compose @composeFiles exec ai-gateway python -m app.cli check-ollama --model $defaultModel
     if ($LASTEXITCODE -ne 0) {
         throw "Ollama connectivity or model check failed from ai-gateway."
     }
     Write-Host "OK Ollama" -ForegroundColor Green
 
     $ollamaModels = Get-OllamaModels -ComposeFiles $composeFiles
-    Assert-OllamaModelPresent -Models $ollamaModels -Model "mistral:latest" -MissingMessage "LLM model missing. Run scripts/prod/prepare-ollama-models.ps1 -Models 'mistral:latest,nomic-embed-text:latest'"
-    Assert-OllamaModelPresent -Models $ollamaModels -Model "nomic-embed-text:latest" -MissingMessage "Embedding model missing. Run scripts/prod/prepare-ollama-models.ps1 -Models 'mistral:latest,nomic-embed-text:latest'"
+    Assert-OllamaModelPresent -Models $ollamaModels -Model $defaultModel -MissingMessage "Default LLM model missing. Run scripts/prod/prepare-ollama-models.ps1 -Models 'qwen2.5:7b,mistral:latest,nomic-embed-text:latest'"
+    Assert-OllamaModelPresent -Models $ollamaModels -Model "nomic-embed-text:latest" -MissingMessage "Embedding model missing. Run scripts/prod/prepare-ollama-models.ps1 -Models 'qwen2.5:7b,mistral:latest,nomic-embed-text:latest'"
 
     Assert-WorkerEnv -ComposeFiles $composeFiles -Name "TRANSCRIPTION_ENGINE" -Expected "faster_whisper"
 
@@ -267,7 +268,7 @@ try {
     }
     Write-Host ""
     Write-Host "Actionable checks:" -ForegroundColor Yellow
-    Write-Host '.\scripts\prod\prepare-ollama-models.ps1 -Models "mistral:latest,nomic-embed-text:latest" -Mode gpu -Source host' -ForegroundColor Yellow
+    Write-Host '.\scripts\prod\prepare-ollama-models.ps1 -Models "qwen2.5:7b,mistral:latest,nomic-embed-text:latest" -Mode gpu -Source host' -ForegroundColor Yellow
     Write-Host '.\scripts\prod\prepare-whisper-model.ps1 -Model medium -Mode gpu' -ForegroundColor Yellow
     Write-Host 'docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml exec ollama ollama list' -ForegroundColor Yellow
     Write-Host 'docker compose -f docker-compose.yml -f infra/docker-compose.prod.external-proxy.yml -f infra/docker-compose.prod.gpu.yml logs ai-gateway' -ForegroundColor Yellow

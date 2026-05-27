@@ -2,27 +2,22 @@
 name: Standard meeting minutes
 language: en
 type: meeting
-description: Full English meeting minutes with decisions, actions, risks, and open points.
+description: Direct English meeting minutes with decisions, actions, and uncertainties.
 ---
 # Meeting minutes
 
+Goal: produce compact, useful minutes.
+Remove any section without useful supported information.
+Do not invent decisions, owners, or due dates.
+
 ## Executive summary
-
-## Participants
-
-## Topics discussed
 
 ## Decisions made
 
 ## Follow-up actions
 
-| Action | Owner | Due date |
-| --- | --- | --- |
+Action | Owner if known | Due date if known
 
 ## Open points
 
-## Risks / blockers
-
 ## Uncertainties or contradictions
-
-## Appendix / additional notes
