@@ -46,9 +46,9 @@ class FakeMeetingOllamaClient:
         assert manual_notes_chars >= 0
         assert template_chars > 0
         assert isinstance(participants, list)
-        assert "Never invent facts" in system_prompt
-        assert "Manual notes (priority source" in user_prompt
-        assert "Transcript (primary source" in user_prompt or "Prepared meeting brief" in user_prompt
+        assert "Never invent facts" in system_prompt or "Do not invent owners" in system_prompt
+        assert "Manual notes" in user_prompt
+        assert "Transcript" in user_prompt or "transcript" in user_prompt or "Prepared meeting brief" in user_prompt
         self.system_prompts.append(system_prompt)
         self.user_prompts.append(user_prompt)
         if self.fail:
@@ -212,6 +212,55 @@ def test_meeting_generate_long_transcript_uses_predigest(client: TestClient, mon
     assert "Decision candidate: conserver le budget" in fake_client.user_prompts[0]
 
 
+def test_meeting_generate_deep_think_uses_section_calls(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("MEETING_DEEP_THINK_MAX_SECTIONS", "3")
+    monkeypatch.setenv("MEETING_DEEP_THINK_EXCERPT_CHARS_PER_SECTION", "500")
+    get_settings.cache_clear()
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(
+            generation_mode="deep_think",
+            output_language="same_as_meeting",
+            manual_notes="## IAM\n- Identify IAM owners.\n\n## Endpoint\n- Check EDR coverage.",
+            transcript="The IAM owner must be identified. Endpoint EDR coverage is important. " * 20,
+        ),
+    )
+
+    app.dependency_overrides.clear()
+    get_settings.cache_clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["generation_mode"] == "deep_think"
+    assert payload["generation_stages"] == 2
+    assert len(fake_client.user_prompts) == 2
+    assert fake_client.predigest_user_prompts == []
+    assert "Section to write: IAM" in fake_client.user_prompts[0]
+    assert "Section to write: Endpoint" in fake_client.user_prompts[1]
+
+
+def test_meeting_generate_deep_think_can_be_disabled(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("MEETING_DEEP_THINK_ENABLED", "false")
+    get_settings.cache_clear()
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(generation_mode="deep_think"),
+    )
+
+    get_settings.cache_clear()
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Deep think meeting generation is disabled."}
+
+
 def test_meeting_generate_cleans_repeated_transcript_lines(client: TestClient) -> None:
     fake_client = FakeMeetingOllamaClient()
     app.dependency_overrides[get_llm_client] = lambda: fake_client
@@ -259,6 +308,48 @@ def test_meeting_generate_defaults_output_language_to_same_as_meeting(client: Te
 
     assert response.status_code == 200
     assert "detect the main meeting language" in fake_client.system_prompts[0]
+
+
+def test_meeting_generate_same_as_meeting_detects_english_sources(client: TestClient) -> None:
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(
+            transcript="The meeting is about zero trust pillars and questions for the AGOS team.",
+            manual_notes="We need to identify people for each pillar and plan the next meeting.",
+            output_language="same_as_meeting",
+        ),
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "written in English" in fake_client.system_prompts[0]
+
+
+def test_meeting_generate_preserves_detailed_manual_note_structure(client: TestClient) -> None:
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(
+            manual_notes="## Pillar IAM\n- Question one\n## Pillar Endpoint\n- EDR and hardening",
+            output_language="en",
+        ),
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "at least as informative as the manual notes" in fake_client.user_prompts[0]
+    assert "Preserve useful agenda structure, pillars, questions" in fake_client.user_prompts[0]
 
 
 def test_meeting_generate_output_language_fr_adds_french_instruction(client: TestClient) -> None:

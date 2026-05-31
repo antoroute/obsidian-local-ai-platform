@@ -75,10 +75,11 @@ The model caches are deliberately separate from application data:
 
 - Ollama models: Docker volume `ollama-data`, mounted at `/root/.ollama`
 - faster-whisper models: Docker volume `whisper-model-cache`, mounted at `/models/whisper`
+- optional diarization models: Docker volume `diarization-model-cache`, mounted at `/models/diarization`
 - PostgreSQL data: Docker volume `postgres-data`
 - uploaded audio: Docker volume `audio-storage`
 
-With the default `COMPOSE_PROJECT_NAME=obsidian-local-ai-platform`, the effective Docker volume names are `obsidian-local-ai-platform_ollama-data` and `obsidian-local-ai-platform_whisper-model-cache`.
+With the default `COMPOSE_PROJECT_NAME=obsidian-local-ai-platform`, the effective Docker volume names are `obsidian-local-ai-platform_ollama-data`, `obsidian-local-ai-platform_whisper-model-cache`, and `obsidian-local-ai-platform_diarization-model-cache`.
 
 Never delete `postgres-data`, Redis/runtime data, `audio-storage`, or vault files when refreshing models.
 
@@ -146,6 +147,17 @@ Prepare faster-whisper:
 .\scripts\prod\prepare-whisper-model.ps1 -Mode gpu -Model medium
 ```
 
+Optional speaker diarization:
+
+```powershell
+.\scripts\prod\prepare-diarization-model.ps1 `
+  -Mode gpu `
+  -Model "pyannote/speaker-diarization-3.1" `
+  -HuggingFaceToken "<hf_token_if_required>"
+```
+
+Diarization is disabled by default. If enabled, Whisper still transcribes the meeting, then pyannote labels anonymous speakers such as `Speaker 1` and `Speaker 2`. The labels help follow exchanges in transcripts and CR generation, but they do not identify real participants. Some pyannote models are gated on Hugging Face; accept the model terms and use the token only during preparation. Runtime can remain local/offline once the model cache is ready.
+
 One-command bootstrap for the normal GPU path:
 
 ```powershell
@@ -155,7 +167,7 @@ One-command bootstrap for the normal GPU path:
   -WhisperModel medium
 ```
 
-Add `-ResetModelCaches` when you intentionally want a clean model cache rebuild. It deletes only `ollama-data` and `whisper-model-cache`.
+Add `-ResetModelCaches` when you intentionally want a clean model cache rebuild. It deletes only `ollama-data`, `whisper-model-cache`, and `diarization-model-cache`.
 
 Clean bootstrap with model cache reset:
 
@@ -872,6 +884,10 @@ Configured healthchecks:
 - `MEETING_TRANSCRIPT_CLEANUP_ENABLED=true` normalizes transcripts before meeting generation by removing empty lines, exact repeated lines, and tiny filler-only lines
 - `MEETING_PREDIGEST_ENABLED=true` enables the controlled hybrid meeting pipeline for long transcripts
 - `MEETING_PREDIGEST_MIN_CHARS=12000` keeps short and medium meetings on a single LLM call, and uses one compact pre-digest call only beyond that threshold
+- `MEETING_DEEP_THINK_ENABLED=true` allows clients to request the optional slower `generation_mode=deep_think` pipeline
+- `MEETING_DEEP_THINK_MAX_SECTIONS=10` bounds section-by-section generation for detailed reports
+- `MEETING_DEEP_THINK_EXCERPT_CHARS_PER_SECTION=3000` bounds transcript excerpts sent to each section prompt
+- `MEETING_DEEP_THINK_FINAL_CLEANUP=true` enables deterministic cleanup of global code fences and leaked prompt labels
 - `MAX_ASSISTANT_MESSAGE_CHARS` controls the maximum assistant chat instruction size
 - `MAX_ASSISTANT_CONTEXT_CHARS` controls the maximum selected text or note context size sent to the assistant endpoint
 - `TRANSCRIPTION_ENGINE` selects `fake` or `faster_whisper`; production-like stacks must use `faster_whisper`
@@ -881,9 +897,12 @@ Configured healthchecks:
 - `WHISPER_LANGUAGE` is an optional global fallback for direct worker checks; normal audio jobs carry per-job language metadata
 - audio clients can now request per-job transcription language with `transcription_language=auto|fr|en`; `auto` does not force a faster-whisper language
 - meeting generation clients can request `output_language=same_as_meeting|fr|en`; this changes the prompt instruction only
+- meeting generation clients can request `generation_mode=standard|deep_think`; `standard` is faster and default, `deep_think` is slower but better for long or important meetings
 - meeting prompts are optimized for local models: direct useful output, no empty template sections, no generic filler, and action items in the simple form `Action | Owner | Due date`
 - `WHISPER_BEAM_SIZE` controls beam search width
 - `WHISPER_MODEL_CACHE_DIR`, `HF_HOME`, and `HUGGINGFACE_HUB_CACHE` should point to the persistent model cache volume in Docker
+- `DIARIZATION_ENABLED=true|false` enables optional local anonymous speaker diarization after Whisper
+- `DIARIZATION_MODEL`, `DIARIZATION_DEVICE`, and `DIARIZATION_MODEL_CACHE_DIR` control the pyannote model, CPU/GPU execution, and dedicated model cache
 - TLS certificate management for public Internet exposure is a later step; Traefik is already positioned as the only public entrypoint
 
 ## Recommended worker settings

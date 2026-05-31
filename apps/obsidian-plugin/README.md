@@ -198,6 +198,18 @@ description: Full English meeting minutes.
 
 The template picker supports language filtering and groups templates by type. When `Output language` is `fr` or `en`, the picker defaults to that language. When output language is `same_as_meeting`, `Preferred template language` controls the default filter.
 
+When generating meeting minutes after a recording, choose the template based on the expected output:
+
+- `Meeting minutes`: standard English report, recommended by default.
+- `Detailed meeting minutes`: detailed English report for long or information-rich meetings.
+- `Technical meeting`: technical decisions, risks, architecture and actions.
+- `Actions only`: extracts actions only, not suitable for a full meeting report.
+
+After the template choice, Note Compagnon asks for the report quality:
+
+- `Standard`: faster generation, suitable for short or simple meetings.
+- `Deep think`: slower generation by sections, recommended for long or important meetings when preserving details matters.
+
 The dashboard installer offers:
 
 - minimal recommended
@@ -217,6 +229,7 @@ Example templates are available in `apps/obsidian-plugin/examples/templates`, in
 - `compte-rendu-reunion-fr.md`
 - `meeting-note-en.md`
 - `meeting-minutes-en.md`
+- `detailed-meeting-minutes-en.md`
 - `actions-only-fr.md`
 - `actions-only-en.md`
 
@@ -272,9 +285,9 @@ Limits:
 
 - if Teams audio is in headphones, a normal microphone may not capture other participants clearly
 - direct global computer-audio capture is not promised unless Windows exposes an input device or Obsidian/Electron provides an audio track
-- diarization / speaker separation is not implemented yet
+- optional local diarization can label anonymous speakers as `Speaker 1`, `Speaker 2`, etc. when enabled on the worker
 
-Recorded audio remains in your vault under `Recordings folder`.
+Recorded audio remains in your vault under `Recordings folder`. After Whisper finishes, Note Compagnon also writes a readable `- transcript.md` file in the same folder and links it from the meeting note and final minutes. If diarization is enabled and succeeds, transcript lines use `Speaker N [hh:mm:ss]: text`; otherwise the plugin keeps the timestamp-only format.
 Tell participants before recording a meeting.
 
 ## Clean AI Summaries
@@ -288,6 +301,7 @@ Final meeting summaries use frontmatter similar to:
 type: meeting_summary
 source_meeting: "[[source note]]"
 source_audio: "[[recording.webm]]"
+source_transcript: "[[recording - transcript]]"
 model: "mistral:latest"
 template: "Compte rendu de reunion"
 transcription_language: "auto"

@@ -19,6 +19,13 @@ class WorkerSettings:
     whisper_model_cache_dir: str
     hf_home: str | None
     huggingface_hub_cache: str | None
+    diarization_enabled: bool = False
+    diarization_provider: str = "pyannote"
+    diarization_model: str = "pyannote/speaker-diarization-3.1"
+    diarization_device: str = "cpu"
+    diarization_model_cache_dir: str = "/models/diarization"
+    diarization_min_speakers: int | None = None
+    diarization_max_speakers: int | None = None
 
 
 def get_settings() -> WorkerSettings:
@@ -36,4 +43,21 @@ def get_settings() -> WorkerSettings:
         whisper_model_cache_dir=os.getenv("WHISPER_MODEL_CACHE_DIR", "/models/whisper"),
         hf_home=os.getenv("HF_HOME") or None,
         huggingface_hub_cache=os.getenv("HUGGINGFACE_HUB_CACHE") or None,
+        diarization_enabled=_parse_bool(os.getenv("DIARIZATION_ENABLED", "false")),
+        diarization_provider=os.getenv("DIARIZATION_PROVIDER", "pyannote"),
+        diarization_model=os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-3.1"),
+        diarization_device=os.getenv("DIARIZATION_DEVICE", os.getenv("WHISPER_DEVICE", "cpu")),
+        diarization_model_cache_dir=os.getenv("DIARIZATION_MODEL_CACHE_DIR", "/models/diarization"),
+        diarization_min_speakers=_parse_optional_int(os.getenv("DIARIZATION_MIN_SPEAKERS")),
+        diarization_max_speakers=_parse_optional_int(os.getenv("DIARIZATION_MAX_SPEAKERS")),
     )
+
+
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_optional_int(value: str | None) -> int | None:
+    if value is None or not value.strip():
+        return None
+    return int(value)

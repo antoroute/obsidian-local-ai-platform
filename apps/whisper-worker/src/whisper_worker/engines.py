@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
 from whisper_worker.config import WorkerSettings
+from whisper_worker.diarization import apply_diarization_to_segments, create_diarization_engine
 from whisper_worker.repositories import TranscriptResult, TranscriptSegment
+
+logger = logging.getLogger(__name__)
 
 
 class TranscriptionEngine:
@@ -23,6 +27,38 @@ class FakeTranscriptionEngine(TranscriptionEngine):
             duration=0,
             segments=[TranscriptSegment(start=0, end=1, text="Fake transcript for testing.")],
         )
+
+
+class DiarizingTranscriptionEngine(TranscriptionEngine):
+    def __init__(self, base_engine: TranscriptionEngine, settings: WorkerSettings) -> None:
+        self._base_engine = base_engine
+        self._settings = settings
+
+    def transcribe(self, input_path: Path, *, transcription_language: str | None = None) -> TranscriptResult:
+        transcript = self._base_engine.transcribe(input_path, transcription_language=transcription_language)
+        try:
+            diarization_engine = create_diarization_engine(self._settings)
+            if diarization_engine is None:
+                return transcript
+            turns = diarization_engine.diarize(input_path)
+            return TranscriptResult(
+                text=transcript.text,
+                language=transcript.language,
+                duration=transcript.duration,
+                segments=apply_diarization_to_segments(transcript.segments, turns),
+                diarization_enabled=True,
+                diarization_status="completed",
+            )
+        except Exception as exc:
+            logger.warning("Diarization failed; keeping Whisper transcript without speaker labels: %s", exc)
+            return TranscriptResult(
+                text=transcript.text,
+                language=transcript.language,
+                duration=transcript.duration,
+                segments=transcript.segments,
+                diarization_enabled=True,
+                diarization_status="failed",
+            )
 
 
 @dataclass(frozen=True)
@@ -89,17 +125,23 @@ def _resolve_faster_whisper_language(transcription_language: str | None, default
 
 def create_engine(settings: WorkerSettings) -> TranscriptionEngine:
     if settings.transcription_engine == "fake":
-        return FakeTranscriptionEngine()
+        return _with_optional_diarization(FakeTranscriptionEngine(), settings)
 
     if settings.transcription_engine == "faster_whisper":
         model = _build_faster_whisper_model(settings)
-        return FasterWhisperEngine(
+        return _with_optional_diarization(FasterWhisperEngine(
             model,
             default_language=settings.whisper_language,
             beam_size=settings.whisper_beam_size,
-        )
+        ), settings)
 
     raise ValueError(f"Unsupported transcription engine: {settings.transcription_engine}")
+
+
+def _with_optional_diarization(engine: TranscriptionEngine, settings: WorkerSettings) -> TranscriptionEngine:
+    if not settings.diarization_enabled:
+        return engine
+    return DiarizingTranscriptionEngine(engine, settings)
 
 
 def check_engine(settings: WorkerSettings) -> EngineCheckResult:

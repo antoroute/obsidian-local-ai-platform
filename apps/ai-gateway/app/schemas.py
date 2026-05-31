@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 OutputLanguage = Literal["same_as_meeting", "fr", "en"]
 TranscriptionLanguage = Literal["auto", "fr", "en"]
+MeetingGenerationMode = Literal["standard", "deep_think"]
 AssistantMode = Literal["chat", "correct", "rewrite", "summarize"]
 AssistantOutputLanguage = Literal["same_as_input", "fr", "en"]
 AssistantResponseStyle = Literal["direct", "detailed"]
@@ -47,6 +48,7 @@ class MeetingGenerateRequest(BaseModel):
     template: str = Field(min_length=1)
     model: str | None = None
     output_language: OutputLanguage = "same_as_meeting"
+    generation_mode: MeetingGenerationMode = "standard"
 
 
 class MeetingGenerateFromJobRequest(BaseModel):
@@ -57,6 +59,7 @@ class MeetingGenerateFromJobRequest(BaseModel):
     template: str = Field(min_length=1)
     model: str | None = None
     output_language: OutputLanguage = "same_as_meeting"
+    generation_mode: MeetingGenerationMode = "standard"
 
 
 class MeetingUsageResponse(BaseModel):
@@ -70,6 +73,8 @@ class MeetingGenerateResponse(BaseModel):
     model: str
     title: str
     meeting_markdown: str
+    generation_mode: MeetingGenerationMode = "standard"
+    generation_stages: int | None = None
     usage: MeetingUsageResponse
 
 
@@ -78,6 +83,8 @@ class MeetingGenerateFromJobResponse(BaseModel):
     model: str
     title: str
     meeting_markdown: str
+    generation_mode: MeetingGenerationMode = "standard"
+    generation_stages: int | None = None
     usage: MeetingUsageResponse
 
 
@@ -98,6 +105,7 @@ class TranscriptSegmentResponse(BaseModel):
     start: float
     end: float
     text: str
+    speaker: str | None = None
 
 
 class TranscriptResponse(BaseModel):
@@ -105,6 +113,8 @@ class TranscriptResponse(BaseModel):
     language: str
     duration: float
     segments: list[TranscriptSegmentResponse]
+    diarization_enabled: bool = False
+    diarization_status: Literal["disabled", "completed", "failed"] = "disabled"
 
 
 class JobResultResponse(BaseModel):

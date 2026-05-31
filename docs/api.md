@@ -364,7 +364,8 @@ Request payload:
   "participants": ["Antonin", "Alice"],
   "template": "Template Markdown ou consignes",
   "model": "qwen2.5:14b",
-  "output_language": "same_as_meeting"
+  "output_language": "same_as_meeting",
+  "generation_mode": "standard"
 }
 ```
 
@@ -376,6 +377,8 @@ Behavior:
 - uses `DEFAULT_MODEL` when `model` is omitted
 - uses `same_as_meeting` when `output_language` is omitted
 - accepts `output_language` values `same_as_meeting`, `fr`, and `en`
+- accepts `generation_mode` values `standard` and `deep_think`; omitted defaults to `standard`
+- `deep_think` generates the report section by section and is slower but better suited to long or information-rich meetings
 - refuses models not present in `ALLOWED_MODELS`
 - enforces `MAX_TRANSCRIPT_CHARS`, `MAX_MANUAL_NOTES_CHARS`, `MAX_TEMPLATE_CHARS`, and `MAX_PARTICIPANTS`
 - uses manual notes as the priority source for names, acronyms, dates, decisions, and actions
@@ -389,6 +392,8 @@ Example response:
   "model": "qwen2.5:14b",
   "title": "Reunion projet",
   "meeting_markdown": "## Resume executif\n\n...",
+  "generation_mode": "standard",
+  "generation_stages": null,
   "usage": {
     "transcript_chars": 123,
     "manual_notes_chars": 456,
@@ -430,7 +435,8 @@ Request payload:
   "participants": ["Antonin", "Alice"],
   "template": "Template Markdown ou consignes",
   "model": "qwen2.5:14b",
-  "output_language": "same_as_meeting"
+  "output_language": "same_as_meeting",
+  "generation_mode": "deep_think"
 }
 ```
 
@@ -441,6 +447,7 @@ Behavior:
 - refuses queued, processing, or failed jobs
 - reuses the same meeting-generation rules as `POST /v1/meetings/generate`
 - accepts `output_language` values `same_as_meeting`, `fr`, and `en`
+- accepts `generation_mode=deep_think` for slower section-by-section detailed reports
 - never exposes internal storage paths in the response
 
 Example response:
@@ -451,6 +458,8 @@ Example response:
   "model": "qwen2.5:14b",
   "title": "Reunion projet",
   "meeting_markdown": "## Resume executif\n\n...",
+  "generation_mode": "deep_think",
+  "generation_stages": 6,
   "usage": {
     "transcript_chars": 123,
     "manual_notes_chars": 456,
@@ -558,16 +567,21 @@ Example response:
     "text": "Fake transcript for testing.",
     "language": "fr",
     "duration": 0,
+    "diarization_enabled": true,
+    "diarization_status": "completed",
     "segments": [
       {
         "start": 0,
         "end": 1,
-        "text": "Fake transcript for testing."
+        "text": "Fake transcript for testing.",
+        "speaker": "Speaker 1"
       }
     ]
   }
 }
 ```
+
+`segments[].speaker`, `diarization_enabled`, and `diarization_status` are optional/non-breaking diarization fields. When diarization is disabled or fails, clients should keep using timestamps and text normally. Speaker labels are anonymous (`Speaker 1`, `Speaker 2`) and must not be treated as real participant names.
 
 ## API principles
 

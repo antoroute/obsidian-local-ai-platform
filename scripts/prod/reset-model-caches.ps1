@@ -61,7 +61,8 @@ try {
     $projectName = Get-ComposeProjectName
     $volumes = @(
         @{ Name = "${projectName}_ollama-data"; ServiceHint = "ollama" },
-        @{ Name = "${projectName}_whisper-model-cache"; ServiceHint = "whisper-worker" }
+        @{ Name = "${projectName}_whisper-model-cache"; ServiceHint = "whisper-worker" },
+        @{ Name = "${projectName}_diarization-model-cache"; ServiceHint = "whisper-worker" }
     )
 
     Write-Host "This script deletes only model cache volumes:" -ForegroundColor Yellow

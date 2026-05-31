@@ -49,6 +49,10 @@ services:
       MEETING_TRANSCRIPT_CLEANUP_ENABLED: ${MEETING_TRANSCRIPT_CLEANUP_ENABLED:-true}
       MEETING_PREDIGEST_ENABLED: ${MEETING_PREDIGEST_ENABLED:-true}
       MEETING_PREDIGEST_MIN_CHARS: ${MEETING_PREDIGEST_MIN_CHARS:-12000}
+      MEETING_DEEP_THINK_ENABLED: ${MEETING_DEEP_THINK_ENABLED:-true}
+      MEETING_DEEP_THINK_MAX_SECTIONS: ${MEETING_DEEP_THINK_MAX_SECTIONS:-10}
+      MEETING_DEEP_THINK_EXCERPT_CHARS_PER_SECTION: ${MEETING_DEEP_THINK_EXCERPT_CHARS_PER_SECTION:-3000}
+      MEETING_DEEP_THINK_FINAL_CLEANUP: ${MEETING_DEEP_THINK_FINAL_CLEANUP:-true}
       MAX_ASSISTANT_MESSAGE_CHARS: ${MAX_ASSISTANT_MESSAGE_CHARS:-20000}
       MAX_ASSISTANT_CONTEXT_CHARS: ${MAX_ASSISTANT_CONTEXT_CHARS:-100000}
       AUDIO_STORAGE_DIR: ${AUDIO_STORAGE_DIR:-/data/audio}
@@ -121,6 +125,8 @@ services:
   whisper-worker:
     build:
       context: ./apps/whisper-worker
+      args:
+        INSTALL_DIARIZATION: ${INSTALL_DIARIZATION:-false}
     environment:
       WHISPER_WORKER_LOG_LEVEL: ${WHISPER_WORKER_LOG_LEVEL:-info}
       WHISPER_WORKER_DATABASE_URL: ${WHISPER_WORKER_DATABASE_URL:-postgresql+psycopg://app:change-me@postgres:5432/obsidian_ai}
@@ -136,6 +142,13 @@ services:
       WHISPER_MODEL_CACHE_DIR: ${WHISPER_MODEL_CACHE_DIR:-/models/whisper}
       HF_HOME: ${HF_HOME:-/models/whisper}
       HUGGINGFACE_HUB_CACHE: ${HUGGINGFACE_HUB_CACHE:-/models/whisper/hub}
+      DIARIZATION_ENABLED: ${DIARIZATION_ENABLED:-false}
+      DIARIZATION_PROVIDER: ${DIARIZATION_PROVIDER:-pyannote}
+      DIARIZATION_MODEL: ${DIARIZATION_MODEL:-pyannote/speaker-diarization-3.1}
+      DIARIZATION_DEVICE: ${DIARIZATION_DEVICE:-cuda}
+      DIARIZATION_MODEL_CACHE_DIR: ${DIARIZATION_MODEL_CACHE_DIR:-/models/diarization}
+      DIARIZATION_MIN_SPEAKERS: "${DIARIZATION_MIN_SPEAKERS:-}"
+      DIARIZATION_MAX_SPEAKERS: "${DIARIZATION_MAX_SPEAKERS:-}"
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     depends_on:
@@ -148,6 +161,7 @@ services:
     volumes:
       - audio-storage:/data/audio
       - whisper-model-cache:/models/whisper
+      - diarization-model-cache:/models/diarization
     restart: unless-stopped
 
   postgres:
@@ -208,5 +222,6 @@ networks:
 volumes:
   audio-storage:
   whisper-model-cache:
+  diarization-model-cache:
   postgres-data:
   ollama-data:

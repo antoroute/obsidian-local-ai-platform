@@ -81,7 +81,7 @@ function Print-EffectiveRuntimeConfiguration {
         $value = Get-GatewayEnv -ComposeFiles $ComposeFiles -Name $name
         Write-Host "ai-gateway $name=$value"
     }
-    foreach ($name in @("TRANSCRIPTION_ENGINE", "WHISPER_MODEL_SIZE", "WHISPER_DEVICE", "WHISPER_COMPUTE_TYPE", "WHISPER_LANGUAGE", "WHISPER_MODEL_CACHE_DIR")) {
+    foreach ($name in @("TRANSCRIPTION_ENGINE", "WHISPER_MODEL_SIZE", "WHISPER_DEVICE", "WHISPER_COMPUTE_TYPE", "WHISPER_LANGUAGE", "WHISPER_MODEL_CACHE_DIR", "DIARIZATION_ENABLED", "DIARIZATION_MODEL", "DIARIZATION_DEVICE", "DIARIZATION_MODEL_CACHE_DIR")) {
         $value = Get-WorkerEnv -ComposeFiles $ComposeFiles -Name $name
         Write-Host "whisper-worker $name=$value"
     }

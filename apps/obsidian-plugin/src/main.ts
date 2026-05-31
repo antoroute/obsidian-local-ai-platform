@@ -34,6 +34,7 @@ type TemplateGroup = "meeting_note" | "meeting_summary" | "actions" | "technical
 type AssistantResponseMode = "simple" | "current_note" | "vault";
 type SettingsTabId = "general" | "assistant" | "meetings" | "audio" | "vault" | "templates" | "advanced";
 type RecordingSource = "microphone_only" | "computer_audio_only" | "microphone_plus_computer_audio" | "experimental_system_capture" | "selected_audio_input";
+type MeetingGenerationMode = "standard" | "deep_think";
 type RecordingSourceUsed =
   | "microphone_only"
   | "computer_audio_only"
@@ -147,7 +148,7 @@ tags: [meeting]
 name: Meeting minutes
 language: en
 type: meeting_summary
-description: Direct, compact and useful meeting minutes with decisions, actions and uncertainties.
+description: Standard English minutes with summary, decisions, actions, open points and uncertainties.
 ---
 ---
 type: meeting_summary
@@ -160,13 +161,20 @@ tags: [meeting, minutes]
 ---
 # Meeting minutes
 
-Goal: produce direct, compact and useful meeting minutes.
+Goal: produce concrete, useful and information-rich meeting minutes.
 Use only the provided sources. Do not invent.
+The final minutes must be at least as informative as the manual notes.
+Preserve useful agenda structure, pillars, questions, answers, decisions, actions, participants, and open points.
+Use the transcript to enrich the manual notes, not to replace them with a generic summary.
 Remove any empty or unhelpful section.
 If a decision or action is uncertain, put it under Uncertainties instead of inventing it.
 Actions format: Action | Owner if known | Due date if known.
 
 ## Executive summary
+
+## Context and objective
+
+## Topics discussed
 
 ## Decisions made
 
@@ -175,6 +183,50 @@ Actions format: Action | Owner if known | Due date if known.
 ## Open points
 
 ## Uncertainties or contradictions
+`,
+  },
+  {
+    fileName: "detailed-meeting-minutes-en.md",
+    language: "en",
+    minimal: false,
+    content: `---
+name: Detailed meeting minutes
+language: en
+type: meeting_summary
+description: Detailed English report that preserves agenda structure, pillars, questions, decisions and actions.
+---
+# Detailed meeting minutes
+
+Goal: produce detailed, concrete and useful meeting minutes.
+Use only the provided transcript and manual notes. Do not invent.
+The final report must be at least as informative as the manual notes.
+Preserve useful structure from the notes, especially agenda items, pillars, workstreams, questions, answers, decisions, actions and open points.
+Use the transcript to enrich the manual notes with clarifications and context.
+Remove only sections that truly have no supported content.
+
+## Executive summary
+
+## Meeting objective
+
+## Context
+
+## Topics discussed
+
+Keep important sub-sections from the notes, such as pillars or workstreams.
+
+## Decisions made
+
+## Actions
+
+Action | Owner if known | Due date if known
+
+## Open points
+
+## Risks / blockers
+
+## Uncertainties or contradictions
+
+## Participants / people mentioned
 `,
   },
   {
@@ -218,23 +270,31 @@ Do not invent owners or due dates.
 `,
   },
 ];
-const FALLBACK_TEMPLATE = `# Compte rendu
+const FALLBACK_TEMPLATE = `# Meeting report
 
-Objectif : compte rendu direct, compact et utile.
-Supprimer les sections vides. Ne pas inventer.
-Si une decision ou action est incertaine, la placer dans Incertitudes.
+Goal: produce an information-rich, concrete and useful meeting report in the requested output language.
+The report must be at least as informative as the manual notes.
+Preserve useful agenda structure, pillars, questions, answers, decisions, actions, participants, and open points.
+Use the transcript to enrich the notes, not to replace them with a generic summary.
+Remove only sections that truly have no supported content. Do not invent.
 
-## Resume executif
+## Executive summary
+
+## Context and objective
+
+## Topics discussed
+
+Preserve important subsections from the notes, such as pillars, workstreams, questions, or agenda items.
 
 ## Decisions
 
-## Actions a suivre
+## Actions
 
-Action | Responsable si connu | Echeance si connue
+Action | Owner if known | Due date if known
 
-## Incertitudes
+## Open points
 
-Signaler uniquement les points flous ou contradictoires.
+## Uncertainties or contradictions
 `;
 
 class UserFacingError extends Error {}
@@ -293,6 +353,25 @@ interface JobStatusResponsePayload {
   error: string | null;
 }
 
+interface TranscriptSegmentPayload {
+  start: number;
+  end: number;
+  text: string;
+  speaker?: string;
+}
+
+interface JobResultResponsePayload {
+  job_id: string;
+  transcript: {
+    text: string;
+    language: string;
+    duration: number;
+    diarization_enabled?: boolean;
+    diarization_status?: "disabled" | "completed" | "failed";
+    segments: TranscriptSegmentPayload[];
+  };
+}
+
 interface MeetingGenerateFromJobPayload {
   job_id: string;
   title: string;
@@ -301,6 +380,7 @@ interface MeetingGenerateFromJobPayload {
   template: string;
   model: string;
   output_language: PluginSettings["outputLanguage"];
+  generation_mode: MeetingGenerationMode;
 }
 
 interface MeetingGenerateFromJobResponsePayload {
@@ -308,6 +388,8 @@ interface MeetingGenerateFromJobResponsePayload {
   model: string;
   title: string;
   meeting_markdown: string;
+  generation_mode?: MeetingGenerationMode;
+  generation_stages?: number | null;
   usage: {
     transcript_chars: number;
     manual_notes_chars: number;
@@ -782,10 +864,12 @@ export default class LocalAiPlatformPlugin extends Plugin {
       if (completedJob.status !== "completed") {
         throw new UserFacingError("The audio job did not complete successfully.");
       }
+      const transcriptResult = await this.requestJobResult(apiBaseUrl, apiToken, queuedJob.job_id);
 
       const metadata = await promptForMeetingMetadata(this.app, stripFileExtension(audioFile.name));
       const templateChoice = await this.chooseTemplate();
-      new Notice("Generating minutes...");
+      const generationMode = await chooseMeetingGenerationMode(this.app);
+      new Notice(formatMeetingGenerationNotice(generationMode));
       const result = await this.requestMeetingFromJob(apiBaseUrl, apiToken, {
         job_id: queuedJob.job_id,
         title: metadata.title,
@@ -794,12 +878,15 @@ export default class LocalAiPlatformPlugin extends Plugin {
         template: this.prepareTemplateForRequest(templateChoice),
         model: this.getDefaultModel(),
         output_language: this.getOutputLanguage(),
+        generation_mode: generationMode,
       });
 
       const outputFile = await this.writeMeetingNote({
         response: result,
         templateChoice,
         sourceAudioName: audioFile.name,
+        transcriptResult,
+        generationMode,
       });
       new Notice(`Minutes created: ${outputFile.path}`);
     } catch (error) {
@@ -892,6 +979,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       const sourceNote = await this.completeMeetingSourceNote(recording, savedAudio.file);
       const manualNotes = await this.app.vault.read(sourceNote);
       const templateChoice = await this.chooseTemplate();
+      const generationMode = await chooseMeetingGenerationMode(this.app);
 
       const apiBaseUrl = this.getApiBaseUrl();
       const apiToken = this.getApiToken();
@@ -900,8 +988,11 @@ export default class LocalAiPlatformPlugin extends Plugin {
       const queuedJob = await this.uploadAudio(apiBaseUrl, apiToken, uploadFile);
       new Notice("Audio uploaded.");
       await this.pollAudioJob(apiBaseUrl, apiToken, queuedJob.job_id);
+      const transcriptResult = await this.requestJobResult(apiBaseUrl, apiToken, queuedJob.job_id);
+      const transcriptFile = await this.saveTranscriptToVault(transcriptResult, savedAudio.file, sourceNote);
+      await this.completeMeetingSourceNote(recording, savedAudio.file, transcriptFile);
 
-      new Notice("Generating minutes...");
+      new Notice(formatMeetingGenerationNotice(generationMode));
       const result = await this.requestMeetingFromJob(apiBaseUrl, apiToken, {
         job_id: queuedJob.job_id,
         title: recording.title,
@@ -910,6 +1001,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         template: this.prepareTemplateForRequest(templateChoice),
         model: this.getDefaultModel(),
         output_language: this.getOutputLanguage(),
+        generation_mode: generationMode,
       });
 
       const outputFile = await this.writeMeetingNote({
@@ -918,6 +1010,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
         sourceAudioName: savedAudio.file.name,
         sourceNoteFile: sourceNote,
         sourceAudioFile: savedAudio.file,
+        transcriptFile,
+        transcriptResult,
+        generationMode,
         recordingSourceUsed: recording.recordingSourceUsed,
         generatedAt: new Date(),
       });
@@ -1350,8 +1445,8 @@ export default class LocalAiPlatformPlugin extends Plugin {
         label: "Built-in default template",
         templateContent: FALLBACK_TEMPLATE,
         sourcePath: null,
-        description: "Fallback template bundled with Note Compagnon.",
-        language: "fr",
+        description: "Default information-rich meeting report. Use this if you are unsure.",
+        language: "en",
         type: "meeting",
         group: "meeting_summary",
       },
@@ -1459,6 +1554,26 @@ export default class LocalAiPlatformPlugin extends Plugin {
     });
 
     return this.parseMeetingGenerateFromJobResponse(responseText);
+  }
+
+  async requestJobResult(apiBaseUrl: string, apiToken: string, jobId: string): Promise<JobResultResponsePayload> {
+    const responseText = await this.performJsonRequest({
+      apiBaseUrl,
+      apiToken,
+      path: `/v1/jobs/${encodeURIComponent(jobId)}/result`,
+      method: "GET",
+      errorMap: {
+        401: "The API token is invalid or expired.",
+        403: "The token is not allowed to access this transcription result.",
+        404: "The audio transcription result was not found.",
+        409: "The audio transcription result is not ready.",
+        503: "The AI Gateway is unavailable.",
+      },
+      unavailableMessage: "The AI Gateway is unreachable.",
+      invalidJsonMessage: "The AI Gateway returned an invalid transcription result.",
+    });
+
+    return this.parseJobResultResponse(responseText);
   }
 
   async requestAssistantChat(
@@ -2282,11 +2397,11 @@ export default class LocalAiPlatformPlugin extends Plugin {
     await ensureFolderExists(this.app, recordingsFolder);
 
     const fileBaseName = `${formatDateTimeForFile(recording.startedAt)} - ${sanitizeFileName(recording.title)}`;
-    const filePath = normalizePath(`${recordingsFolder}/${fileBaseName}${recording.fileExtension}`);
+    const filePath = getAvailableVaultPath(this.app, normalizePath(`${recordingsFolder}/${fileBaseName}${recording.fileExtension}`));
     const arrayBuffer = await recording.blob.arrayBuffer();
 
     try {
-      await this.app.vault.adapter.writeBinary(filePath, arrayBuffer);
+      await this.app.vault.createBinary(filePath, arrayBuffer);
     } catch {
       throw new UserFacingError("Failed to save the recorded audio in the vault.");
     }
@@ -2299,7 +2414,32 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return { file: savedFile, blob: recording.blob };
   }
 
-  async completeMeetingSourceNote(recording: RecordingStopResult, audioFile: TFile): Promise<TFile> {
+  async saveTranscriptToVault(
+    result: JobResultResponsePayload,
+    audioFile: TFile,
+    sourceNoteFile?: TFile,
+  ): Promise<TFile> {
+    const folderPath = audioFile.parent?.path ?? this.getRecordingsFolder();
+    await ensureFolderExists(this.app, folderPath);
+    const transcriptPath = getAvailableVaultPath(this.app, normalizePath(`${folderPath}/${audioFile.basename} - transcript.md`));
+    const audioLink = sourceNoteFile
+      ? this.app.metadataCache.fileToLinktext(audioFile, sourceNoteFile.path, true)
+      : this.app.metadataCache.fileToLinktext(audioFile, "", true);
+    const content = buildTranscriptNote({
+      audioLink,
+      jobId: result.job_id,
+      language: result.transcript.language,
+      duration: result.transcript.duration,
+      diarizationEnabled: result.transcript.diarization_enabled ?? false,
+      diarizationStatus: result.transcript.diarization_status ?? "disabled",
+      segments: result.transcript.segments,
+      text: result.transcript.text,
+      generatedAt: new Date(),
+    });
+    return createOrReplaceFile(this.app, transcriptPath, content);
+  }
+
+  async completeMeetingSourceNote(recording: RecordingStopResult, audioFile: TFile, transcriptFile?: TFile): Promise<TFile> {
     const sourceNote = this.app.vault.getAbstractFileByPath(recording.notePath);
     if (!(sourceNote instanceof TFile)) {
       throw new UserFacingError("The meeting note could not be found.");
@@ -2307,7 +2447,8 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
     const currentContent = await this.app.vault.read(sourceNote);
     const audioLink = this.app.metadataCache.fileToLinktext(audioFile, sourceNote.path, true);
-    const nextContent = markMeetingSourceNoteCompleted(currentContent, audioLink);
+    const transcriptLink = transcriptFile ? this.app.metadataCache.fileToLinktext(transcriptFile, sourceNote.path, true) : null;
+    const nextContent = markMeetingSourceNoteCompleted(currentContent, audioLink, transcriptLink);
     await this.app.vault.modify(sourceNote, nextContent);
     return sourceNote;
   }
@@ -2343,6 +2484,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
     sourceAudioName: string;
     sourceNoteFile?: TFile;
     sourceAudioFile?: TFile;
+    transcriptFile?: TFile;
+    transcriptResult?: JobResultResponsePayload;
+    generationMode?: MeetingGenerationMode;
     recordingSourceUsed?: string;
     generatedAt?: Date;
   }): Promise<TFile> {
@@ -2360,6 +2504,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
     const sourceAudioLink = input.sourceAudioFile
       ? this.app.metadataCache.fileToLinktext(input.sourceAudioFile, "", true)
       : null;
+    const transcriptLink = input.transcriptFile ? this.app.metadataCache.fileToLinktext(input.transcriptFile, "", true) : null;
     const noteContent = buildMeetingNote({
       title: input.response.title,
       generatedAt,
@@ -2371,6 +2516,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
       audioFileName: input.sourceAudioName,
       sourceMeetingLink,
       sourceAudioLink,
+      transcriptLink,
+      transcriptLanguage: input.transcriptResult?.transcript.language,
+      generationMode: input.generationMode ?? input.response.generation_mode ?? "standard",
       recordingSourceUsed: input.recordingSourceUsed ?? "external_audio_file",
       meetingMarkdown: cleanGeneratedMarkdown(input.response.meeting_markdown),
     });
@@ -2440,6 +2588,14 @@ export default class LocalAiPlatformPlugin extends Plugin {
     const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid job status response.");
     if (!isJobStatusResponsePayload(parsed)) {
       throw new UserFacingError("The AI Gateway returned an invalid job status response.");
+    }
+    return parsed;
+  }
+
+  parseJobResultResponse(responseText: string): JobResultResponsePayload {
+    const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid transcription result.");
+    if (!isJobResultResponsePayload(parsed)) {
+      throw new UserFacingError("The AI Gateway returned an invalid transcription result.");
     }
     return parsed;
   }
@@ -3370,10 +3526,12 @@ class TemplatePickerModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Choose a template" });
-    contentEl.createEl("p", { text: "Pick the Markdown template to send with this request." });
+    contentEl.createEl("h2", { text: "Choisir le type de compte rendu" });
+    contentEl.createEl("p", {
+      text: "Le template guide le niveau de detail et les sections du CR. Pour une reunion longue, choisis un template standard/detaille plutot qu'un template actions-only.",
+    });
     new Setting(contentEl)
-      .setName("Language filter")
+      .setName("Filtre langue")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("all", "Auto / Tous")
@@ -3388,23 +3546,28 @@ class TemplatePickerModal extends Modal {
 
     const visibleChoices = this.choices.filter((choice) => this.languageFilter === "all" || !choice.language || choice.language === this.languageFilter);
     const groups = groupTemplateChoices(visibleChoices);
+    if (visibleChoices.length === 0) {
+      contentEl.createEl("p", { text: "Aucun template disponible pour ce filtre. Essaie Auto / Tous ou installe les templates recommandes." });
+      return;
+    }
     for (const [group, choices] of groups) {
       contentEl.createEl("h3", { text: formatTemplateGroup(group) });
       for (const choice of choices) {
         const setting = new Setting(contentEl).setName(choice.label);
-      const details = [
-        choice.description,
-        choice.language ? `Language: ${choice.language}` : null,
-        choice.type ? `Type: ${choice.type}` : null,
-        choice.sourcePath ?? "Uses the built-in fallback template.",
-      ].filter((item): item is string => item !== null && item.trim().length > 0);
-      setting.setDesc(details.join(" | "));
-      setting.addButton((button) =>
-        button.setButtonText("Use template").setCta().onClick(() => {
-          this.onChoose(choice);
-          this.close();
-        }),
-      );
+        const details = [
+          formatTemplateUsageHint(choice),
+          choice.description,
+          choice.language ? `Langue: ${choice.language}` : null,
+          choice.type ? `Type: ${choice.type}` : null,
+          choice.sourcePath ?? "Template integre par defaut.",
+        ].filter((item): item is string => item !== null && item.trim().length > 0);
+        setting.setDesc(details.join(" | "));
+        setting.addButton((button) =>
+          button.setButtonText("Utiliser").setCta().onClick(() => {
+            this.onChoose(choice);
+            this.close();
+          }),
+        );
       }
     }
   }
@@ -3591,6 +3754,48 @@ class SystemAudioExplanationModal extends Modal {
   }
 }
 
+class MeetingGenerationModeModal extends Modal {
+  constructor(
+    app: App,
+    private readonly onChoose: (mode: MeetingGenerationMode) => void,
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Qualite du compte rendu" });
+    contentEl.createEl("p", {
+      text: "Choisis le mode de generation. Deep think est plus lent, mais recommande pour les reunions longues ou importantes.",
+    });
+
+    new Setting(contentEl)
+      .setName("Standard")
+      .setDesc("Generation actuelle, plus rapide. Adaptee aux reunions courtes ou peu denses.")
+      .addButton((button) =>
+        button.setButtonText("Standard").setCta().onClick(() => {
+          this.onChoose("standard");
+          this.close();
+        }),
+      );
+
+    new Setting(contentEl)
+      .setName("Deep think")
+      .setDesc("Generation detaillee par sections pour preserver plus d'informations. Peut prendre plusieurs minutes.")
+      .addButton((button) =>
+        button.setButtonText("Deep think").onClick(() => {
+          this.onChoose("deep_think");
+          this.close();
+        }),
+      );
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
 class TemplateInstallModal extends Modal {
   private readonly onChoose: (installSet: TemplateInstallSet) => void;
 
@@ -3667,6 +3872,33 @@ function isJobStatusResponsePayload(value: unknown): value is JobStatusResponseP
     typeof candidate.created_at === "string" &&
     typeof candidate.updated_at === "string" &&
     (typeof candidate.error === "string" || candidate.error === null)
+  );
+}
+
+function isJobResultResponsePayload(value: unknown): value is JobResultResponsePayload {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as Partial<JobResultResponsePayload>;
+  const transcript = candidate.transcript as Partial<JobResultResponsePayload["transcript"]> | undefined;
+  return (
+    typeof candidate.job_id === "string" &&
+    typeof transcript === "object" &&
+    transcript !== null &&
+    typeof transcript.text === "string" &&
+    typeof transcript.language === "string" &&
+    typeof transcript.duration === "number" &&
+    Array.isArray(transcript.segments) &&
+    transcript.segments.every((segment) =>
+      typeof segment === "object" &&
+      segment !== null &&
+      typeof (segment as Partial<TranscriptSegmentPayload>).start === "number" &&
+      typeof (segment as Partial<TranscriptSegmentPayload>).end === "number" &&
+      typeof (segment as Partial<TranscriptSegmentPayload>).text === "string" &&
+      ((segment as Partial<TranscriptSegmentPayload>).speaker === undefined ||
+        typeof (segment as Partial<TranscriptSegmentPayload>).speaker === "string"),
+    )
   );
 }
 
@@ -3858,6 +4090,23 @@ async function createOrReplaceFile(app: App, outputPath: string, contents: strin
     return existing;
   }
   return app.vault.create(outputPath, contents);
+}
+
+function getAvailableVaultPath(app: App, targetPath: string): string {
+  if (!app.vault.getAbstractFileByPath(targetPath)) {
+    return targetPath;
+  }
+
+  const dotIndex = targetPath.lastIndexOf(".");
+  const base = dotIndex > 0 ? targetPath.slice(0, dotIndex) : targetPath;
+  const extension = dotIndex > 0 ? targetPath.slice(dotIndex) : "";
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${base} ${index}${extension}`;
+    if (!app.vault.getAbstractFileByPath(candidate)) {
+      return candidate;
+    }
+  }
+  throw new UserFacingError(`No available file name for ${targetPath}.`);
 }
 
 function formatDate(date: Date): string {
@@ -4070,6 +4319,25 @@ function formatTemplateGroup(group: TemplateGroup): string {
   return "Other";
 }
 
+function formatTemplateUsageHint(choice: TemplateChoice): string {
+  if (choice.group === "actions") {
+    return "Usage: extrait uniquement les actions, pas adapte pour un CR complet.";
+  }
+  if (choice.group === "technical") {
+    return "Usage: reunion technique, architecture, risques, decisions et actions techniques.";
+  }
+  if (choice.label.toLowerCase().includes("detailed")) {
+    return "Usage: CR detaille, recommande pour les reunions longues ou riches.";
+  }
+  if (choice.group === "meeting_summary") {
+    return "Usage: CR standard complet, recommande par defaut.";
+  }
+  if (choice.group === "meeting_note") {
+    return "Usage: note source de reunion, pas un template de CR final.";
+  }
+  return "Usage: template personnalise.";
+}
+
 function buildLanguageInstruction(outputLanguage: PluginSettings["outputLanguage"]): string {
   if (outputLanguage === "fr") {
     return [
@@ -4113,9 +4381,11 @@ function buildMeetingGenerationIntent(templateChoice: TemplateChoice): string {
   }
   return [
     "## Intention de generation",
-    "Mode : compte rendu direct.",
-    "Produire un compte rendu compact, utile et exploitable.",
-    "Blocs preferes : resume, decisions, actions, points ouverts, incertitudes.",
+    "Mode : compte rendu direct et riche en informations.",
+    "Produire un compte rendu concret, utile et exploitable, au moins aussi informatif que les notes manuelles.",
+    "Preserver les structures utiles des notes : piliers, questions, reponses, sujets, points ouverts, decisions et actions.",
+    "Utiliser la transcription pour enrichir les notes, pas pour les remplacer par un resume generique.",
+    "Blocs preferes : resume, contexte, sujets abordes, decisions, actions, points ouverts, incertitudes.",
     "Supprimer toute section vide ou non supportee par les sources.",
     "Si une decision ou action n'est pas certaine, la mettre dans les incertitudes.",
   ].join("\n");
@@ -4231,6 +4501,13 @@ function formatRecordingSourceLabel(recordingSource: RecordingSource, microphone
     return "Capture systeme experimentale";
   }
   return `Micro seul (${microphoneLabel})`;
+}
+
+function formatMeetingGenerationNotice(mode: MeetingGenerationMode): string {
+  if (mode === "deep_think") {
+    return "Generating detailed minutes with Deep think... This can take several minutes.";
+  }
+  return "Generating minutes...";
 }
 
 function formatRagScoreDetails(result: { score: number; vector_score?: number | null; keyword_bonus?: number | null; matched_terms?: string[] }): string {
@@ -4412,13 +4689,73 @@ tags:
 - [[ ]]
 `;
 }
-function markMeetingSourceNoteCompleted(currentContent: string, audioLink: string): string {
-  if (currentContent.includes("Audio file:")) {
+function markMeetingSourceNoteCompleted(currentContent: string, audioLink: string, transcriptLink?: string | null): string {
+  const linesToAdd: string[] = [];
+  if (!currentContent.includes("Audio file:")) {
+    linesToAdd.push(`Audio file: [[${audioLink}]]`);
+  }
+  if (transcriptLink && !currentContent.includes("Transcript file:")) {
+    linesToAdd.push(`Transcript file: [[${transcriptLink}]]`);
+  }
+  if (linesToAdd.length === 0) {
     return currentContent;
   }
 
-  const insertion = `Audio file: [[${audioLink}]]`;
-  return `${currentContent.trimEnd()}\n\n${insertion}\n`;
+  return `${currentContent.trimEnd()}\n\n${linesToAdd.join("\n")}\n`;
+}
+
+function buildTranscriptNote(input: {
+  audioLink: string;
+  jobId: string;
+  language: string;
+  duration: number;
+  diarizationEnabled: boolean;
+  diarizationStatus: "disabled" | "completed" | "failed";
+  segments: TranscriptSegmentPayload[];
+  text: string;
+  generatedAt: Date;
+}): string {
+  const segmentLines = input.segments
+    .map((segment) => {
+      const text = segment.text.trim();
+      if (!text) return null;
+      if (segment.speaker) {
+        return `- ${segment.speaker} [${formatTranscriptTimestamp(segment.start)}]: ${text}`;
+      }
+      return `- ${formatTranscriptTimestamp(segment.start)} - ${formatTranscriptTimestamp(segment.end)}: ${text}`;
+    })
+    .filter((line): line is string => line !== null);
+
+  const body = segmentLines.length > 0 ? segmentLines.join("\n") : input.text.trim();
+  return `---
+type: transcript
+source_audio: ${yamlQuote(`[[${input.audioLink}]]`)}
+job_id: ${yamlQuote(input.jobId)}
+language: ${yamlQuote(input.language)}
+duration_seconds: ${Math.round(input.duration)}
+diarization_enabled: ${input.diarizationEnabled ? "true" : "false"}
+diarization_status: ${yamlQuote(input.diarizationStatus)}
+created: ${formatDate(input.generatedAt)}
+tags:
+  - transcript
+  - meeting
+---
+# Transcription - ${input.audioLink}
+
+Audio : [[${input.audioLink}]]
+
+## Transcription
+
+${body}
+`;
+}
+
+function formatTranscriptTimestamp(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const remainingSeconds = safeSeconds % 60;
+  return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${remainingSeconds.toString().padStart(2, "0")}`;
 }
 
 function buildMeetingNote(input: {
@@ -4432,21 +4769,27 @@ function buildMeetingNote(input: {
   audioFileName: string;
   sourceMeetingLink: string | null;
   sourceAudioLink: string | null;
+  transcriptLink: string | null;
+  transcriptLanguage?: string;
+  generationMode: MeetingGenerationMode;
   recordingSourceUsed: string;
   meetingMarkdown: string;
 }): string {
   const sourceMeeting = input.sourceMeetingLink ? `[[${input.sourceMeetingLink}]]` : "";
   const sourceAudio = input.sourceAudioLink ? `[[${input.sourceAudioLink}]]` : input.audioFileName;
-  const linksSection = buildUsefulLinksSection(sourceMeeting, sourceAudio);
+  const sourceTranscript = input.transcriptLink ? `[[${input.transcriptLink}]]` : "";
+  const linksSection = buildUsefulLinksSection(sourceMeeting, sourceAudio, sourceTranscript);
 
   return `---
 type: meeting_summary
 source_meeting: ${yamlQuote(sourceMeeting)}
 source_audio: ${yamlQuote(sourceAudio)}
+source_transcript: ${yamlQuote(sourceTranscript)}
 model: ${yamlQuote(input.model)}
 template: ${yamlQuote(input.templateLabel)}
-transcription_language: ${yamlQuote(input.transcriptionLanguage)}
+transcription_language: ${yamlQuote(input.transcriptLanguage || input.transcriptionLanguage)}
 output_language: ${yamlQuote(input.outputLanguage)}
+generation_mode: ${yamlQuote(input.generationMode)}
 recording_source_used: ${yamlQuote(input.recordingSourceUsed)}
 job_id: ${yamlQuote(input.jobId)}
 created: ${formatDate(input.generatedAt)}
@@ -4462,10 +4805,11 @@ ${linksSection}
 `;
 }
 
-function buildUsefulLinksSection(sourceMeeting: string, sourceAudio: string): string {
+function buildUsefulLinksSection(sourceMeeting: string, sourceAudio: string, sourceTranscript = ""): string {
   const links = [
     sourceMeeting ? `- Note source : ${sourceMeeting}` : null,
     sourceAudio ? `- Audio : ${sourceAudio.startsWith("[[") ? sourceAudio : sourceAudio}` : null,
+    sourceTranscript ? `- Transcription : ${sourceTranscript}` : null,
   ].filter((line): line is string => line !== null);
 
   return ["## Liens utiles", ...links].join("\n");
@@ -4491,6 +4835,25 @@ function chooseTemplateWithModal(app: App, choices: TemplateChoice[], languageFi
       }
     };
 
+    modal.open();
+  });
+}
+
+function chooseMeetingGenerationMode(app: App): Promise<MeetingGenerationMode> {
+  return new Promise((resolve, reject) => {
+    let resolved = false;
+    const modal = new MeetingGenerationModeModal(app, (mode) => {
+      resolved = true;
+      resolve(mode);
+    });
+
+    const originalOnClose = modal.onClose.bind(modal);
+    modal.onClose = () => {
+      originalOnClose();
+      if (!resolved) {
+        reject(new UserFacingError("Action cancelled."));
+      }
+    };
     modal.open();
   });
 }

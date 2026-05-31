@@ -20,6 +20,12 @@ from app.jobs import (
     require_job_for_user,
 )
 from app.meetings import (
+    DeepThinkRenderedSection,
+    PreparedMeetingRequest,
+    assemble_deep_think_report,
+    build_deep_think_section_system_prompt,
+    build_deep_think_section_user_prompt,
+    build_deep_think_sections,
     build_meeting_user_prompt_from_brief,
     extract_transcript_text_from_result,
     prepare_meeting_from_job_request,
@@ -212,6 +218,68 @@ async def assistant_chat(
     )
 
 
+async def run_meeting_generation(prepared_request: PreparedMeetingRequest, llm_client: LlmClient) -> tuple[str, str, int | None]:
+    if prepared_request.generation_mode == "deep_think":
+        sections = build_deep_think_sections(prepared_request, get_settings())
+        rendered_sections: list[DeepThinkRenderedSection] = []
+        last_model = prepared_request.selected_model
+        for section in sections:
+            result = await llm_client.generate_meeting(
+                model=prepared_request.selected_model,
+                title=prepared_request.title,
+                transcript_chars=len(section.transcript_excerpt),
+                manual_notes_chars=len(section.manual_notes),
+                template_chars=prepared_request.template_chars,
+                participants=prepared_request.participants,
+                system_prompt=build_deep_think_section_system_prompt(
+                    resolve_prepared_output_language(prepared_request),
+                ),
+                user_prompt=build_deep_think_section_user_prompt(prepared_request, section),
+            )
+            last_model = result.model
+            rendered_sections.append(DeepThinkRenderedSection(title=section.title, markdown=result.content))
+        return (
+            last_model,
+            assemble_deep_think_report(
+                prepared_request,
+                rendered_sections,
+                final_cleanup=get_settings().meeting_deep_think_final_cleanup,
+            ),
+            len(rendered_sections),
+        )
+
+    user_prompt = prepared_request.user_prompt
+    if prepared_request.should_predigest:
+        brief = await llm_client.predigest_meeting(
+            model=prepared_request.selected_model,
+            title=prepared_request.title,
+            transcript_chars=prepared_request.transcript_chars,
+            manual_notes_chars=prepared_request.manual_notes_chars,
+            system_prompt=prepared_request.predigest_system_prompt,
+            user_prompt=prepared_request.predigest_user_prompt,
+        )
+        user_prompt = build_meeting_user_prompt_from_brief(prepared_request, brief.content)
+    result = await llm_client.generate_meeting(
+        model=prepared_request.selected_model,
+        title=prepared_request.title,
+        transcript_chars=prepared_request.transcript_chars,
+        manual_notes_chars=prepared_request.manual_notes_chars,
+        template_chars=prepared_request.template_chars,
+        participants=prepared_request.participants,
+        system_prompt=prepared_request.system_prompt,
+        user_prompt=user_prompt,
+    )
+    return result.model, result.content, None
+
+
+def resolve_prepared_output_language(prepared_request: PreparedMeetingRequest) -> str:
+    if "Language instruction: the meeting minutes must be written in English." in prepared_request.system_prompt:
+        return "en"
+    if "Language instruction: the meeting minutes must be written in French." in prepared_request.system_prompt:
+        return "fr"
+    return "same_as_meeting"
+
+
 @app.post("/v1/meetings/generate", tags=["meetings"], response_model=MeetingGenerateResponse)
 async def generate_meeting_report(
     payload: MeetingGenerateRequest,
@@ -222,27 +290,7 @@ async def generate_meeting_report(
     prepared_request = prepare_meeting_request(payload, get_settings())
 
     try:
-        user_prompt = prepared_request.user_prompt
-        if prepared_request.should_predigest:
-            brief = await llm_client.predigest_meeting(
-                model=prepared_request.selected_model,
-                title=prepared_request.title,
-                transcript_chars=prepared_request.transcript_chars,
-                manual_notes_chars=prepared_request.manual_notes_chars,
-                system_prompt=prepared_request.predigest_system_prompt,
-                user_prompt=prepared_request.predigest_user_prompt,
-            )
-            user_prompt = build_meeting_user_prompt_from_brief(prepared_request, brief.content)
-        result = await llm_client.generate_meeting(
-            model=prepared_request.selected_model,
-            title=prepared_request.title,
-            transcript_chars=prepared_request.transcript_chars,
-            manual_notes_chars=prepared_request.manual_notes_chars,
-            template_chars=prepared_request.template_chars,
-            participants=prepared_request.participants,
-            system_prompt=prepared_request.system_prompt,
-            user_prompt=user_prompt,
-        )
+        result_model, result_content, generation_stages = await run_meeting_generation(prepared_request, llm_client)
     except OllamaUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -255,9 +303,11 @@ async def generate_meeting_report(
         ) from exc
 
     return MeetingGenerateResponse(
-        model=result.model,
+        model=result_model,
         title=prepared_request.title,
-        meeting_markdown=result.content,
+        meeting_markdown=result_content,
+        generation_mode=prepared_request.generation_mode,
+        generation_stages=generation_stages,
         usage=MeetingUsageResponse(
             transcript_chars=prepared_request.transcript_chars,
             manual_notes_chars=prepared_request.manual_notes_chars,
@@ -291,27 +341,7 @@ async def generate_meeting_report_from_job(
     prepared_request = prepare_meeting_from_job_request(payload, transcript=transcript_text, settings=get_settings())
 
     try:
-        user_prompt = prepared_request.user_prompt
-        if prepared_request.should_predigest:
-            brief = await llm_client.predigest_meeting(
-                model=prepared_request.selected_model,
-                title=prepared_request.title,
-                transcript_chars=prepared_request.transcript_chars,
-                manual_notes_chars=prepared_request.manual_notes_chars,
-                system_prompt=prepared_request.predigest_system_prompt,
-                user_prompt=prepared_request.predigest_user_prompt,
-            )
-            user_prompt = build_meeting_user_prompt_from_brief(prepared_request, brief.content)
-        result = await llm_client.generate_meeting(
-            model=prepared_request.selected_model,
-            title=prepared_request.title,
-            transcript_chars=prepared_request.transcript_chars,
-            manual_notes_chars=prepared_request.manual_notes_chars,
-            template_chars=prepared_request.template_chars,
-            participants=prepared_request.participants,
-            system_prompt=prepared_request.system_prompt,
-            user_prompt=user_prompt,
-        )
+        result_model, result_content, generation_stages = await run_meeting_generation(prepared_request, llm_client)
     except OllamaUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -325,9 +355,11 @@ async def generate_meeting_report_from_job(
 
     return MeetingGenerateFromJobResponse(
         job_id=job.id,
-        model=result.model,
+        model=result_model,
         title=prepared_request.title,
-        meeting_markdown=result.content,
+        meeting_markdown=result_content,
+        generation_mode=prepared_request.generation_mode,
+        generation_stages=generation_stages,
         usage=MeetingUsageResponse(
             transcript_chars=prepared_request.transcript_chars,
             manual_notes_chars=prepared_request.manual_notes_chars,

@@ -6,6 +6,7 @@ import time
 
 from whisper_worker.config import get_settings
 from whisper_worker.database import Base, create_engine_for_settings, create_session_factory, ensure_job_metadata_column
+from whisper_worker.diarization import prepare_diarization_model
 from whisper_worker.engines import check_engine, create_engine, prepare_model
 from whisper_worker.processor import process_audio_job
 from whisper_worker.queue_backend import RedisQueueBackend
@@ -29,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("check-engine", help="Check whether the configured transcription engine can be loaded")
     prepare_parser = subparsers.add_parser("prepare-model", help="Download and cache the configured faster-whisper model")
     prepare_parser.add_argument("--model", required=False, help="Optional model size override, for example medium or large-v3")
+    diarization_parser = subparsers.add_parser(
+        "prepare-diarization-model",
+        help="Download and cache the configured pyannote diarization model",
+    )
+    diarization_parser.add_argument("--model", required=False, help="Optional model override")
 
     return parser
 
@@ -60,6 +66,11 @@ def check_engine_command() -> int:
     print(f"WHISPER_DEVICE={settings.whisper_device}")
     print(f"WHISPER_COMPUTE_TYPE={settings.whisper_compute_type}")
     print(f"WHISPER_MODEL_CACHE_DIR={settings.whisper_model_cache_dir}")
+    print(f"DIARIZATION_ENABLED={settings.diarization_enabled}")
+    print(f"DIARIZATION_PROVIDER={settings.diarization_provider}")
+    print(f"DIARIZATION_MODEL={settings.diarization_model}")
+    print(f"DIARIZATION_DEVICE={settings.diarization_device}")
+    print(f"DIARIZATION_MODEL_CACHE_DIR={settings.diarization_model_cache_dir}")
     try:
         result = check_engine(settings)
     except Exception as exc:
@@ -86,6 +97,23 @@ def prepare_model_command(model_override: str | None) -> int:
     return 0
 
 
+def prepare_diarization_model_command(model_override: str | None) -> int:
+    settings = get_settings()
+    selected_model = model_override or settings.diarization_model
+    print(f"Preparing diarization model: {selected_model}")
+    print(f"Model cache directory: {settings.diarization_model_cache_dir}")
+    print("A Hugging Face token may be required for gated pyannote models.")
+
+    try:
+        model_path = prepare_diarization_model(settings, model_name=selected_model)
+    except Exception as exc:
+        print(str(exc))
+        return 1
+
+    print(f"Diarization model prepared successfully: {model_path}")
+    return 0
+
+
 def main() -> int:
     configure_logging()
     parser = build_parser()
@@ -100,6 +128,8 @@ def main() -> int:
             return check_engine_command()
         if command == "prepare-model":
             return prepare_model_command(args.model)
+        if command == "prepare-diarization-model":
+            return prepare_diarization_model_command(args.model)
         parser.error("Unknown command")
         return 1
     except KeyboardInterrupt:

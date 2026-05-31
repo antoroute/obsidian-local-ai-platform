@@ -195,7 +195,9 @@ def test_completed_job_result_is_returned(client: TestClient) -> None:
                 "text": "Fake transcript for testing.",
                 "language": "fr",
                 "duration": 0,
-                "segments": [{"start": 0, "end": 1, "text": "Fake transcript for testing."}],
+                "diarization_enabled": True,
+                "diarization_status": "completed",
+                "segments": [{"start": 0, "end": 1, "text": "Fake transcript for testing.", "speaker": "Speaker 1"}],
             }
         ),
         encoding="utf-8",
@@ -212,3 +214,5 @@ def test_completed_job_result_is_returned(client: TestClient) -> None:
 
     assert result_response.status_code == 200
     assert result_response.json()["transcript"]["text"] == "Fake transcript for testing."
+    assert result_response.json()["transcript"]["diarization_status"] == "completed"
+    assert result_response.json()["transcript"]["segments"][0]["speaker"] == "Speaker 1"

@@ -134,6 +134,8 @@ Production scripts may invoke the token CLI, but they must not write the raw tok
 - transcription files remain local to the server and are not sent to a third-party cloud service by this pipeline
 - worker logs should avoid printing full transcript bodies when they are large
 - Docker deployments should keep audio artifacts on a shared internal volume such as `audio-storage`, mounted identically in the gateway and worker
+- optional diarization runs locally after Whisper; pyannote model preparation may require a Hugging Face token, but runtime can remain offline once the dedicated `diarization-model-cache` volume is prepared
+- diarization labels are anonymous (`Speaker 1`, `Speaker 2`) and must not be treated as verified participant identities
 
 ## Required future work
 

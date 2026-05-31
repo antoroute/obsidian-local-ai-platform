@@ -5,11 +5,20 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 from whisper_worker.database import Base, create_engine_for_settings, create_session_factory
-from whisper_worker.engines import FakeTranscriptionEngine, FasterWhisperEngine, check_engine, create_engine, normalize_faster_whisper_error
+from whisper_worker.diarization import SpeakerTurn, apply_diarization_to_segments
+from whisper_worker.engines import (
+    DiarizingTranscriptionEngine,
+    FakeTranscriptionEngine,
+    FasterWhisperEngine,
+    check_engine,
+    create_engine,
+    normalize_faster_whisper_error,
+)
 from whisper_worker.models import Job
 from whisper_worker.processor import process_audio_job
 from whisper_worker.repositories import JOB_STATUS_COMPLETED, JOB_STATUS_FAILED
 from whisper_worker.config import WorkerSettings
+from whisper_worker.repositories import TranscriptSegment
 
 
 def make_settings(tmp_path) -> WorkerSettings:
@@ -75,10 +84,61 @@ def test_fake_engine_respects_english_transcription_language(tmp_path) -> None:
     assert result.language == "en"
 
 
+def test_transcript_result_serializes_optional_speaker(tmp_path) -> None:
+    engine = FakeTranscriptionEngine()
+
+    result = engine.transcribe(tmp_path / "input.mp3")
+    segment = result.segments[0]
+    enriched = type(result)(
+        text=result.text,
+        language=result.language,
+        duration=result.duration,
+        segments=[TranscriptSegment(start=segment.start, end=segment.end, text=segment.text, speaker="Speaker 1")],
+        diarization_enabled=True,
+        diarization_status="completed",
+    )
+
+    payload = enriched.to_dict()
+
+    assert payload["diarization_enabled"] is True
+    assert payload["diarization_status"] == "completed"
+    assert payload["segments"][0]["speaker"] == "Speaker 1"  # type: ignore[index]
+
+
+def test_diarization_assigns_speaker_by_overlap() -> None:
+    segments = [
+        TranscriptSegment(start=0.0, end=2.0, text="Hello"),
+        TranscriptSegment(start=2.0, end=4.0, text="Bonjour"),
+    ]
+    turns = [
+        SpeakerTurn(start=0.0, end=1.8, speaker="Speaker 1"),
+        SpeakerTurn(start=2.1, end=3.8, speaker="Speaker 2"),
+    ]
+
+    enriched = apply_diarization_to_segments(segments, turns)
+
+    assert enriched[0].speaker == "Speaker 1"
+    assert enriched[1].speaker == "Speaker 2"
+
+
 def test_fake_engine_remains_selectable(tmp_path) -> None:
     engine = create_engine(make_settings(tmp_path))
 
     assert isinstance(engine, FakeTranscriptionEngine)
+
+
+def test_engine_factory_wraps_diarization_when_enabled(tmp_path) -> None:
+    settings = make_settings(tmp_path)
+    settings = WorkerSettings(
+        **{
+            **settings.__dict__,
+            "diarization_enabled": True,
+        }
+    )
+
+    engine = create_engine(settings)
+
+    assert isinstance(engine, DiarizingTranscriptionEngine)
 
 
 def test_engine_factory_rejects_unknown_value(tmp_path) -> None:

@@ -2,7 +2,7 @@
 name: Meeting minutes
 language: en
 type: meeting_summary
-description: Direct, compact and useful meeting minutes with decisions, actions and uncertainties.
+description: Standard English minutes with summary, decisions, actions, open points and uncertainties.
 ---
 ---
 type: meeting_summary
@@ -15,13 +15,20 @@ tags: [meeting, minutes]
 ---
 # Meeting minutes
 
-Goal: produce direct, compact and useful meeting minutes.
+Goal: produce concrete, useful and information-rich meeting minutes.
 Use only the provided sources. Do not invent.
+The final minutes must be at least as informative as the manual notes.
+Preserve useful agenda structure, pillars, questions, answers, decisions, actions, participants, and open points.
+Use the transcript to enrich the manual notes, not to replace them with a generic summary.
 Remove any empty or unhelpful section.
 If a decision or action is uncertain, put it under Uncertainties instead of inventing it.
 Actions format: Action | Owner if known | Due date if known.
 
 ## Executive summary
+
+## Context and objective
+
+## Topics discussed
 
 ## Decisions made
 

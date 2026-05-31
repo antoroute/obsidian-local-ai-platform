@@ -18,6 +18,7 @@ class TranscriptSegment:
     start: float
     end: float
     text: str
+    speaker: str | None = None
 
 
 @dataclass(frozen=True)
@@ -26,14 +27,24 @@ class TranscriptResult:
     language: str
     duration: float
     segments: list[TranscriptSegment]
+    diarization_enabled: bool = False
+    diarization_status: str = "disabled"
 
     def to_dict(self) -> dict[str, object]:
         return {
             "text": self.text,
             "language": self.language,
             "duration": self.duration,
+            "diarization_enabled": self.diarization_enabled,
+            "diarization_status": self.diarization_status,
             "segments": [
-                {"start": segment.start, "end": segment.end, "text": segment.text} for segment in self.segments
+                {
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": segment.text,
+                    **({"speaker": segment.speaker} if segment.speaker else {}),
+                }
+                for segment in self.segments
             ],
         }
 
