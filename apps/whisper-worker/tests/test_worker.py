@@ -5,7 +5,15 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 from whisper_worker.database import Base, create_engine_for_settings, create_session_factory
-from whisper_worker.diarization import SpeakerTurn, apply_diarization_to_segments
+from whisper_worker.diarization import (
+    SpeakerTurn,
+    apply_diarization_to_segments,
+    build_offline_pyannote_pipeline_config,
+    download_required_pyannote_snapshots,
+    load_pyannote_pipeline,
+    normalize_pyannote_load_error,
+    required_pyannote_dependency_models,
+)
 from whisper_worker.engines import (
     DiarizingTranscriptionEngine,
     FakeTranscriptionEngine,
@@ -121,6 +129,159 @@ def test_diarization_assigns_speaker_by_overlap() -> None:
     assert enriched[1].speaker == "Speaker 2"
 
 
+def test_runtime_pyannote_load_uses_local_files_only(tmp_path) -> None:
+    class FakePipeline:
+        captured_kwargs: dict[str, object] | None = None
+        captured_model_name: str | None = None
+        captured_hf_offline: str | None = None
+
+        @classmethod
+        def from_pretrained(cls, model_name: str, **kwargs):
+            cls.captured_model_name = model_name
+            cls.captured_kwargs = kwargs
+            import os
+
+            cls.captured_hf_offline = os.getenv("HF_HUB_OFFLINE")
+            return object()
+
+    seed_pyannote_cache(tmp_path)
+
+    load_pyannote_pipeline(
+        FakePipeline,
+        "pyannote/speaker-diarization-3.1",
+        cache_dir=tmp_path,
+        local_files_only=True,
+    )
+
+    assert FakePipeline.captured_kwargs is not None
+    assert FakePipeline.captured_model_name is not None
+    captured_model_name = FakePipeline.captured_model_name.replace("\\", "/")
+    assert captured_model_name.endswith("offline-configs/pyannote--speaker-diarization-3.1.yaml")
+    assert "local_files_only" not in FakePipeline.captured_kwargs
+    assert FakePipeline.captured_hf_offline == "1"
+
+
+def test_prepare_pyannote_load_allows_download(tmp_path) -> None:
+    class FakePipeline:
+        captured_kwargs: dict[str, object] | None = None
+
+        @classmethod
+        def from_pretrained(cls, model_name: str, **kwargs):
+            assert model_name == "pyannote/speaker-diarization-3.1"
+            cls.captured_kwargs = kwargs
+            return object()
+
+    load_pyannote_pipeline(
+        FakePipeline,
+        "pyannote/speaker-diarization-3.1",
+        cache_dir=tmp_path,
+        local_files_only=False,
+    )
+
+    assert FakePipeline.captured_kwargs is not None
+    assert "local_files_only" not in FakePipeline.captured_kwargs
+
+
+def test_prepare_downloads_pyannote_pipeline_dependencies(monkeypatch, tmp_path) -> None:
+    calls: list[str] = []
+
+    fake_module = ModuleType("huggingface_hub")
+
+    def fake_snapshot_download(repo_id: str, **kwargs):
+        calls.append(repo_id)
+        assert kwargs["cache_dir"] == str(tmp_path)
+        return str(tmp_path / repo_id.replace("/", "--"))
+
+    fake_module.snapshot_download = fake_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_module)
+
+    download_required_pyannote_snapshots("pyannote/speaker-diarization-3.1", tmp_path)
+
+    assert calls == [
+        "pyannote/speaker-diarization-3.1",
+        "pyannote/segmentation-3.0",
+        "pyannote/wespeaker-voxceleb-resnet34-LM",
+    ]
+
+
+def test_required_pyannote_dependency_models_are_explicit() -> None:
+    assert required_pyannote_dependency_models("pyannote/speaker-diarization-3.1") == [
+        "pyannote/segmentation-3.0",
+        "pyannote/wespeaker-voxceleb-resnet34-LM",
+    ]
+
+
+def test_offline_pyannote_config_points_to_local_checkpoints(tmp_path) -> None:
+    seed_pyannote_cache(tmp_path)
+
+    config_path = build_offline_pyannote_pipeline_config(tmp_path, "pyannote/speaker-diarization-3.1")
+    text = config_path.read_text(encoding="utf-8")
+
+    assert "pyannote/segmentation-3.0" not in text
+    assert "pyannote/wespeaker-voxceleb-resnet34-LM" not in text
+    assert "models--pyannote--segmentation-3.0" in text
+    assert "models--pyannote--wespeaker-voxceleb-resnet34-LM" in text
+    assert "pytorch_model.bin" in text
+
+
+def test_normalize_pyannote_load_error_reports_missing_local_cache() -> None:
+    error = RuntimeError("LocalEntryNotFoundError: cannot find the requested files in the local cache")
+
+    normalized = normalize_pyannote_load_error(
+        error,
+        "pyannote/speaker-diarization-3.1",
+        local_files_only=True,
+    )
+
+    assert "not available in the local cache" in str(normalized)
+    assert "prepare-diarization-model.ps1" in str(normalized)
+
+
+def test_runtime_pyannote_load_rejects_incomplete_cache(tmp_path) -> None:
+    class FakePipeline:
+        @classmethod
+        def from_pretrained(cls, model_name: str, **kwargs):
+            raise AssertionError("from_pretrained should not be called when cache is incomplete")
+
+    try:
+        load_pyannote_pipeline(
+            FakePipeline,
+            "pyannote/speaker-diarization-3.1",
+            cache_dir=tmp_path,
+            local_files_only=True,
+        )
+    except RuntimeError as exc:
+        assert "not fully available in the local cache" in str(exc)
+        assert "pyannote/segmentation-3.0/pytorch_model.bin" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeError for incomplete pyannote cache")
+
+
+def seed_pyannote_cache(cache_dir: Path) -> None:
+    for model_name, file_name in [
+        ("pyannote/speaker-diarization-3.1", "config.yaml"),
+        ("pyannote/segmentation-3.0", "pytorch_model.bin"),
+        ("pyannote/wespeaker-voxceleb-resnet34-LM", "pytorch_model.bin"),
+    ]:
+        snapshot_dir = cache_dir / f"models--{model_name.replace('/', '--')}" / "snapshots" / "test"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        if model_name == "pyannote/speaker-diarization-3.1":
+            (snapshot_dir / file_name).write_text(
+                """
+version: 3.1.0
+pipeline:
+  name: pyannote.audio.pipelines.SpeakerDiarization
+  params:
+    embedding: pyannote/wespeaker-voxceleb-resnet34-LM
+    segmentation: pyannote/segmentation-3.0
+params: {}
+""".strip(),
+                encoding="utf-8",
+            )
+        else:
+            (snapshot_dir / file_name).write_text("cache", encoding="utf-8")
+
+
 def test_fake_engine_remains_selectable(tmp_path) -> None:
     engine = create_engine(make_settings(tmp_path))
 
@@ -139,6 +300,31 @@ def test_engine_factory_wraps_diarization_when_enabled(tmp_path) -> None:
     engine = create_engine(settings)
 
     assert isinstance(engine, DiarizingTranscriptionEngine)
+
+
+def test_diarization_engine_is_cached_between_jobs(tmp_path, monkeypatch) -> None:
+    class CountingDiarizationEngine:
+        def diarize(self, input_path: Path):
+            return [SpeakerTurn(start=0.0, end=1.0, speaker="Speaker 1")]
+
+    calls = 0
+
+    def fake_create_diarization_engine(settings):
+        nonlocal calls
+        calls += 1
+        return CountingDiarizationEngine()
+
+    monkeypatch.setattr("whisper_worker.engines.create_diarization_engine", fake_create_diarization_engine)
+    engine = DiarizingTranscriptionEngine(FakeTranscriptionEngine(), make_settings(tmp_path))
+
+    first = engine.transcribe(tmp_path / "a.mp3")
+    second = engine.transcribe(tmp_path / "b.mp3")
+
+    assert calls == 1
+    assert first.diarization_status == "completed"
+    assert second.diarization_status == "completed"
+    assert first.segments[0].speaker == "Speaker 1"
+    assert second.segments[0].speaker == "Speaker 1"
 
 
 def test_engine_factory_rejects_unknown_value(tmp_path) -> None:

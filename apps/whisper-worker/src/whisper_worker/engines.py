@@ -7,6 +7,7 @@ from typing import Any
 
 from whisper_worker.config import WorkerSettings
 from whisper_worker.diarization import apply_diarization_to_segments, create_diarization_engine
+from whisper_worker.diarization import DiarizationEngine
 from whisper_worker.repositories import TranscriptResult, TranscriptSegment
 
 logger = logging.getLogger(__name__)
@@ -33,14 +34,18 @@ class DiarizingTranscriptionEngine(TranscriptionEngine):
     def __init__(self, base_engine: TranscriptionEngine, settings: WorkerSettings) -> None:
         self._base_engine = base_engine
         self._settings = settings
+        self._diarization_engine: DiarizationEngine | None = None
+        self._diarization_engine_loaded = False
 
     def transcribe(self, input_path: Path, *, transcription_language: str | None = None) -> TranscriptResult:
         transcript = self._base_engine.transcribe(input_path, transcription_language=transcription_language)
         try:
-            diarization_engine = create_diarization_engine(self._settings)
+            diarization_engine = self._get_diarization_engine()
             if diarization_engine is None:
                 return transcript
+            logger.info("Running diarization for audio duration %.2fs", transcript.duration)
             turns = diarization_engine.diarize(input_path)
+            logger.info("Diarization completed with %s speaker turns", len(turns))
             return TranscriptResult(
                 text=transcript.text,
                 language=transcript.language,
@@ -59,6 +64,12 @@ class DiarizingTranscriptionEngine(TranscriptionEngine):
                 diarization_enabled=True,
                 diarization_status="failed",
             )
+
+    def _get_diarization_engine(self) -> DiarizationEngine | None:
+        if not self._diarization_engine_loaded:
+            self._diarization_engine = create_diarization_engine(self._settings)
+            self._diarization_engine_loaded = True
+        return self._diarization_engine
 
 
 @dataclass(frozen=True)

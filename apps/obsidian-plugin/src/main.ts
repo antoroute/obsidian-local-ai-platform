@@ -416,6 +416,8 @@ interface AudioInputDeviceChoice {
 interface MeetingMetadata {
   title: string;
   manualNotes: string;
+  outputLanguage: PluginSettings["outputLanguage"];
+  sourceNoteFile?: TFile;
 }
 
 interface RecordingStartMetadata {
@@ -857,6 +859,17 @@ export default class LocalAiPlatformPlugin extends Plugin {
       }
 
       ensureSupportedAudioFile(audioFile.name);
+      const activeNote = this.app.workspace.getActiveFile();
+      const initialNotes = activeNote?.extension === "md" ? await this.app.vault.read(activeNote) : "";
+      const metadata = await promptForMeetingMetadata(this.app, {
+        initialTitle: activeNote?.extension === "md" ? activeNote.basename : stripFileExtension(audioFile.name),
+        detectedManualNotes: initialNotes,
+        detectedSourceNoteFile: activeNote?.extension === "md" ? activeNote : undefined,
+        defaultOutputLanguage: this.getOutputLanguage(),
+      });
+      const templateChoice = await this.chooseTemplate();
+      const generationMode = await chooseMeetingGenerationMode(this.app);
+
       new Notice(`Uploading audio: ${audioFile.name}`);
       const queuedJob = await this.uploadAudio(apiBaseUrl, apiToken, audioFile);
       new Notice("Audio uploaded.");
@@ -865,10 +878,12 @@ export default class LocalAiPlatformPlugin extends Plugin {
         throw new UserFacingError("The audio job did not complete successfully.");
       }
       const transcriptResult = await this.requestJobResult(apiBaseUrl, apiToken, queuedJob.job_id);
+      const transcriptFile = await this.saveExternalAudioTranscriptToVault(
+        transcriptResult,
+        audioFile.name,
+        metadata.sourceNoteFile,
+      );
 
-      const metadata = await promptForMeetingMetadata(this.app, stripFileExtension(audioFile.name));
-      const templateChoice = await this.chooseTemplate();
-      const generationMode = await chooseMeetingGenerationMode(this.app);
       new Notice(formatMeetingGenerationNotice(generationMode));
       const result = await this.requestMeetingFromJob(apiBaseUrl, apiToken, {
         job_id: queuedJob.job_id,
@@ -877,7 +892,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         participants: [],
         template: this.prepareTemplateForRequest(templateChoice),
         model: this.getDefaultModel(),
-        output_language: this.getOutputLanguage(),
+        output_language: metadata.outputLanguage,
         generation_mode: generationMode,
       });
 
@@ -885,6 +900,8 @@ export default class LocalAiPlatformPlugin extends Plugin {
         response: result,
         templateChoice,
         sourceAudioName: audioFile.name,
+        sourceNoteFile: metadata.sourceNoteFile,
+        transcriptFile,
         transcriptResult,
         generationMode,
       });
@@ -2439,6 +2456,29 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return createOrReplaceFile(this.app, transcriptPath, content);
   }
 
+  async saveExternalAudioTranscriptToVault(
+    result: JobResultResponsePayload,
+    audioFileName: string,
+    sourceNoteFile?: TFile,
+  ): Promise<TFile> {
+    const folderPath = sourceNoteFile?.parent?.path || this.getRecordingsFolder();
+    await ensureFolderExists(this.app, folderPath);
+    const audioBaseName = sanitizeFileName(stripFileExtension(audioFileName));
+    const transcriptPath = getAvailableVaultPath(this.app, normalizePath(`${folderPath}/${audioBaseName} - transcript.md`));
+    const content = buildTranscriptNote({
+      audioLink: audioFileName,
+      jobId: result.job_id,
+      language: result.transcript.language,
+      duration: result.transcript.duration,
+      diarizationEnabled: result.transcript.diarization_enabled ?? false,
+      diarizationStatus: result.transcript.diarization_status ?? "disabled",
+      segments: result.transcript.segments,
+      text: result.transcript.text,
+      generatedAt: new Date(),
+    });
+    return createOrReplaceFile(this.app, transcriptPath, content);
+  }
+
   async completeMeetingSourceNote(recording: RecordingStopResult, audioFile: TFile, transcriptFile?: TFile): Promise<TFile> {
     const sourceNote = this.app.vault.getAbstractFileByPath(recording.notePath);
     if (!(sourceNote instanceof TFile)) {
@@ -3579,47 +3619,99 @@ class TemplatePickerModal extends Modal {
 
 class MeetingMetadataModal extends Modal {
   private readonly onSubmit: (value: MeetingMetadata) => void;
+  private readonly detectedSourceNoteFile?: TFile;
+  private readonly detectedManualNotes: string;
   private titleValue: string;
   private manualNotesValue = "";
+  private outputLanguageValue: PluginSettings["outputLanguage"];
+  private useDetectedNote = false;
 
-  constructor(app: App, initialTitle: string, onSubmit: (value: MeetingMetadata) => void) {
+  constructor(
+    app: App,
+    input: {
+      initialTitle: string;
+      detectedManualNotes: string;
+      detectedSourceNoteFile?: TFile;
+      defaultOutputLanguage: PluginSettings["outputLanguage"];
+    },
+    onSubmit: (value: MeetingMetadata) => void,
+  ) {
     super(app);
-    this.titleValue = initialTitle;
+    this.titleValue = input.initialTitle;
+    this.detectedManualNotes = input.detectedManualNotes;
+    this.detectedSourceNoteFile = input.detectedSourceNoteFile;
+    this.outputLanguageValue = input.defaultOutputLanguage;
     this.onSubmit = onSubmit;
   }
 
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Meeting details" });
+    contentEl.createEl("h2", { text: "Audio + notes" });
+    contentEl.createEl("p", {
+      text: this.detectedSourceNoteFile
+        ? `Note detectee : ${this.detectedSourceNoteFile.path}`
+        : "Aucune note active : tu peux coller des notes manuellement.",
+    });
+
+    let textarea: HTMLTextAreaElement;
+    if (this.detectedSourceNoteFile) {
+      new Setting(contentEl)
+        .setName("Utiliser cette note comme notes de reunion")
+        .setDesc("La note active ne sera envoyee que si cette option est activee.")
+        .addToggle((toggle) =>
+          toggle.setValue(false).onChange((value) => {
+            this.useDetectedNote = value;
+            this.manualNotesValue = value ? this.detectedManualNotes : "";
+            textarea.value = this.manualNotesValue;
+          }),
+        );
+    }
 
     new Setting(contentEl)
-      .setName("Meeting title")
-      .setDesc("Required for the generated meeting minutes.")
+      .setName("Titre de reunion")
+      .setDesc("Utilise pour le compte rendu genere.")
       .addText((text) =>
         text.setValue(this.titleValue).onChange((value) => {
           this.titleValue = value;
         }),
       );
 
-    contentEl.createEl("p", { text: "Manual notes (optional)" });
-    const textarea = contentEl.createEl("textarea");
-    textarea.rows = 10;
+    new Setting(contentEl)
+      .setName("Langue du compte rendu")
+      .setDesc("Choix ponctuel pour cette generation uniquement.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("same_as_meeting", "Meme langue que la reunion")
+          .addOption("fr", "Francais")
+          .addOption("en", "English")
+          .setValue(this.outputLanguageValue)
+          .onChange((value) => {
+            this.outputLanguageValue = value as PluginSettings["outputLanguage"];
+          }),
+      );
+
+    contentEl.createEl("p", { text: "Notes de reunion (optionnel, modifiable avant generation)" });
+    textarea = contentEl.createEl("textarea");
+    textarea.rows = 14;
     textarea.style.width = "100%";
+    textarea.value = this.manualNotesValue;
     textarea.addEventListener("input", () => {
       this.manualNotesValue = textarea.value;
     });
 
     new Setting(contentEl).addButton((button) =>
-      button.setButtonText("Generate minutes").setCta().onClick(() => {
+      button.setButtonText("Generer le CR").setCta().onClick(() => {
         const trimmedTitle = this.titleValue.trim();
         if (!trimmedTitle) {
-          new Notice("Meeting title is required.", 5000);
+          new Notice("Le titre de reunion est obligatoire.", 5000);
           return;
         }
         this.onSubmit({
           title: trimmedTitle,
           manualNotes: this.manualNotesValue.trim(),
+          outputLanguage: this.outputLanguageValue,
+          sourceNoteFile: this.useDetectedNote ? this.detectedSourceNoteFile : undefined,
         });
         this.close();
       }),
@@ -4383,7 +4475,7 @@ function buildMeetingGenerationIntent(templateChoice: TemplateChoice): string {
     "## Intention de generation",
     "Mode : compte rendu direct et riche en informations.",
     "Produire un compte rendu concret, utile et exploitable, au moins aussi informatif que les notes manuelles.",
-    "Preserver les structures utiles des notes : piliers, questions, reponses, sujets, points ouverts, decisions et actions.",
+    "Preserver les structures utiles des notes : sujets, themes, questions, reponses, points ouverts, decisions et actions.",
     "Utiliser la transcription pour enrichir les notes, pas pour les remplacer par un resume generique.",
     "Blocs preferes : resume, contexte, sujets abordes, decisions, actions, points ouverts, incertitudes.",
     "Supprimer toute section vide ou non supportee par les sources.",
@@ -4882,13 +4974,30 @@ function confirmSystemAudioCapture(app: App): Promise<boolean> {
   });
 }
 
-function promptForMeetingMetadata(app: App, initialTitle: string): Promise<MeetingMetadata> {
+function promptForMeetingMetadata(
+  app: App,
+  input: {
+    initialTitle: string;
+    detectedManualNotes?: string;
+    detectedSourceNoteFile?: TFile;
+    defaultOutputLanguage: PluginSettings["outputLanguage"];
+  },
+): Promise<MeetingMetadata> {
   return new Promise((resolve, reject) => {
     let submitted = false;
-    const modal = new MeetingMetadataModal(app, initialTitle, (value) => {
-      submitted = true;
-      resolve(value);
-    });
+    const modal = new MeetingMetadataModal(
+      app,
+      {
+        initialTitle: input.initialTitle,
+        detectedManualNotes: input.detectedManualNotes ?? "",
+        detectedSourceNoteFile: input.detectedSourceNoteFile,
+        defaultOutputLanguage: input.defaultOutputLanguage,
+      },
+      (value) => {
+        submitted = true;
+        resolve(value);
+      },
+    );
 
     const originalOnClose = modal.onClose.bind(modal);
     modal.onClose = () => {

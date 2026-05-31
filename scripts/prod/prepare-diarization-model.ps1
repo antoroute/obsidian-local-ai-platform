@@ -75,7 +75,7 @@ try {
     Write-Host ""
     Write-Host "Failed to prepare the diarization model." -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
-    Write-Host "pyannote models may require accepting model terms on Hugging Face and passing a token during preparation." -ForegroundColor Yellow
+    Write-Host "pyannote models require accepting the Hugging Face terms for pyannote/speaker-diarization-3.1 and pyannote/segmentation-3.0, then passing a token during preparation." -ForegroundColor Yellow
     Write-Host "Retry example: .\scripts\prod\prepare-diarization-model.ps1 -Mode $Mode -Model '$Model' -HuggingFaceToken '<hf_token>'" -ForegroundColor Yellow
     exit 1
 } finally {

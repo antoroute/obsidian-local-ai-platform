@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 import os
 from pathlib import Path
+from collections.abc import Iterator
 from typing import Any
+import yaml
 
 from whisper_worker.config import WorkerSettings
 from whisper_worker.repositories import TranscriptSegment
@@ -51,14 +54,28 @@ def create_diarization_engine(settings: WorkerSettings) -> DiarizationEngine | N
         raise ValueError(f"Unsupported diarization provider: {settings.diarization_provider}")
 
     ensure_python_int_digit_compat()
+    model_cache_dir = Path(settings.diarization_model_cache_dir)
+    model_cache_dir.mkdir(parents=True, exist_ok=True)
+    missing = missing_required_pyannote_cache_entries(model_cache_dir, settings.diarization_model)
+    if missing:
+        missing_list = ", ".join(missing)
+        raise RuntimeError(
+            f"Diarization model '{settings.diarization_model}' is not fully available in the local cache. "
+            f"Missing: {missing_list}. "
+            "Run scripts/prod/prepare-diarization-model.ps1 with a Hugging Face token after accepting the pyannote model terms."
+        )
+
     try:
         from pyannote.audio import Pipeline
     except ImportError as exc:
         raise RuntimeError("DIARIZATION_ENABLED=true requires the pyannote.audio extra to be installed.") from exc
 
-    model_cache_dir = Path(settings.diarization_model_cache_dir)
-    model_cache_dir.mkdir(parents=True, exist_ok=True)
-    pipeline = load_pyannote_pipeline(Pipeline, settings.diarization_model, cache_dir=model_cache_dir)
+    pipeline = load_pyannote_pipeline(
+        Pipeline,
+        settings.diarization_model,
+        cache_dir=model_cache_dir,
+        local_files_only=True,
+    )
     if settings.diarization_device == "cuda":
         try:
             import torch
@@ -122,8 +139,43 @@ def prepare_diarization_model(settings: WorkerSettings, *, model_name: str | Non
     except ImportError as exc:
         raise RuntimeError("Preparing a diarization model requires the pyannote.audio extra to be installed.") from exc
 
-    load_pyannote_pipeline(Pipeline, selected_model, cache_dir=cache_dir)
+    download_required_pyannote_snapshots(selected_model, cache_dir)
+    load_pyannote_pipeline(Pipeline, selected_model, cache_dir=cache_dir, local_files_only=False)
+    missing = missing_required_pyannote_cache_entries(cache_dir, selected_model)
+    if missing:
+        missing_list = ", ".join(missing)
+        raise RuntimeError(
+            f"Diarization model '{selected_model}' is not fully available after preparation. "
+            f"Missing: {missing_list}. "
+            "Check that the Hugging Face token can access all pyannote model terms."
+        )
     return cache_dir
+
+
+def download_required_pyannote_snapshots(model_name: str, cache_dir: Path) -> None:
+    """Materialize pyannote pipeline dependencies that may be loaded lazily."""
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError("Preparing diarization models requires huggingface-hub.") from exc
+
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
+    snapshot_kwargs: dict[str, object] = {"cache_dir": str(cache_dir)}
+    if token:
+        snapshot_kwargs["token"] = token
+
+    snapshot_download(repo_id=model_name, **snapshot_kwargs)
+    for dependency in required_pyannote_dependency_models(model_name):
+        snapshot_download(repo_id=dependency, **snapshot_kwargs)
+
+
+def required_pyannote_dependency_models(model_name: str) -> list[str]:
+    if model_name == "pyannote/speaker-diarization-3.1":
+        return [
+            "pyannote/segmentation-3.0",
+            "pyannote/wespeaker-voxceleb-resnet34-LM",
+        ]
+    return []
 
 
 def ensure_python_int_digit_compat() -> None:
@@ -137,30 +189,172 @@ def ensure_python_int_digit_compat() -> None:
         setattr(sys, "set_int_max_str_digits", lambda maxdigits: None)
 
 
-def load_pyannote_pipeline(pipeline_class: Any, model_name: str, *, cache_dir: Path) -> Any:
+def load_pyannote_pipeline(
+    pipeline_class: Any,
+    model_name: str,
+    *,
+    cache_dir: Path,
+    local_files_only: bool,
+) -> Any:
+    if local_files_only:
+        missing = missing_required_pyannote_cache_entries(cache_dir, model_name)
+        if missing:
+            missing_list = ", ".join(missing)
+            raise RuntimeError(
+                f"Diarization model '{model_name}' is not fully available in the local cache. "
+                f"Missing: {missing_list}. "
+                "Run scripts/prod/prepare-diarization-model.ps1 with a Hugging Face token after accepting the pyannote model terms."
+            )
+
+    checkpoint_path = model_name
+    if local_files_only:
+        checkpoint_path = str(build_offline_pyannote_pipeline_config(cache_dir, model_name))
+
     token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
+    base_kwargs: dict[str, object] = {"cache_dir": str(cache_dir)}
     attempts: list[dict[str, object]] = []
     if token:
-        attempts.append({"cache_dir": str(cache_dir), "use_auth_token": token})
-        attempts.append({"cache_dir": str(cache_dir), "token": token})
-    attempts.append({"cache_dir": str(cache_dir)})
+        attempts.append({**base_kwargs, "use_auth_token": token})
+        attempts.append({**base_kwargs, "token": token})
+    attempts.append(base_kwargs)
+    if not local_files_only:
+        # Older pyannote/huggingface-hub combinations may not accept
+        # local_files_only. Keep that fallback only during explicit model
+        # preparation, never during runtime where network is intentionally off.
+        attempts.append({"cache_dir": str(cache_dir)})
 
     last_error: Exception | None = None
-    for kwargs in attempts:
-        try:
-            pipeline = pipeline_class.from_pretrained(model_name, **kwargs)
-            if pipeline is None:
-                raise RuntimeError(
-                    f"Could not load diarization model '{model_name}'. Accept the pyannote model terms on Hugging Face and pass -HuggingFaceToken or set HF_TOKEN during preparation."
-                )
-            return pipeline
-        except TypeError as exc:
-            last_error = exc
-            continue
-        except Exception as exc:
-            last_error = exc
-            break
+    with temporary_huggingface_offline_mode(enabled=local_files_only):
+        for kwargs in attempts:
+            try:
+                pipeline = pipeline_class.from_pretrained(checkpoint_path, **kwargs)
+                if pipeline is None:
+                    raise RuntimeError(
+                        f"Could not load diarization model '{model_name}'. Accept the pyannote model terms on Hugging Face and pass -HuggingFaceToken or set HF_TOKEN during preparation."
+                    )
+                return pipeline
+            except TypeError as exc:
+                last_error = exc
+                continue
+            except Exception as exc:
+                last_error = normalize_pyannote_load_error(exc, model_name, local_files_only=local_files_only)
+                break
 
     if last_error is not None:
+        if local_files_only and isinstance(last_error, TypeError):
+            raise RuntimeError(
+                f"Diarization model '{model_name}' could not be loaded from the local cache. "
+                "Run scripts/prod/prepare-diarization-model.ps1 with a Hugging Face token after accepting the pyannote model terms."
+            ) from last_error
         raise last_error
-    return pipeline_class.from_pretrained(model_name)
+    return pipeline_class.from_pretrained(checkpoint_path)
+
+
+@contextmanager
+def temporary_huggingface_offline_mode(*, enabled: bool) -> Iterator[None]:
+    if not enabled:
+        yield
+        return
+
+    previous_hf_hub_offline = os.environ.get("HF_HUB_OFFLINE")
+    previous_transformers_offline = os.environ.get("TRANSFORMERS_OFFLINE")
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    try:
+        yield
+    finally:
+        restore_env_var("HF_HUB_OFFLINE", previous_hf_hub_offline)
+        restore_env_var("TRANSFORMERS_OFFLINE", previous_transformers_offline)
+
+
+def restore_env_var(name: str, value: str | None) -> None:
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+
+
+def missing_required_pyannote_cache_entries(cache_dir: Path, model_name: str) -> list[str]:
+    missing: list[str] = []
+    if get_snapshot_file(cache_dir, model_name, "config.yaml") is None:
+        missing.append(f"{model_name}/config.yaml")
+
+    if model_name == "pyannote/speaker-diarization-3.1":
+        if get_snapshot_file(cache_dir, "pyannote/segmentation-3.0", "pytorch_model.bin") is None:
+            missing.append("pyannote/segmentation-3.0/pytorch_model.bin")
+        if get_snapshot_file(cache_dir, "pyannote/wespeaker-voxceleb-resnet34-LM", "pytorch_model.bin") is None:
+            missing.append("pyannote/wespeaker-voxceleb-resnet34-LM/pytorch_model.bin")
+
+    return missing
+
+
+def has_snapshot_file(cache_dir: Path, model_name: str, file_name: str) -> bool:
+    return get_snapshot_file(cache_dir, model_name, file_name) is not None
+
+
+def get_snapshot_file(cache_dir: Path, model_name: str, file_name: str) -> Path | None:
+    model_cache_dir = cache_dir / f"models--{model_name.replace('/', '--')}"
+    snapshots_dir = model_cache_dir / "snapshots"
+    if not snapshots_dir.exists():
+        return None
+    return next((path for path in snapshots_dir.rglob(file_name) if path.name == file_name), None)
+
+
+def build_offline_pyannote_pipeline_config(cache_dir: Path, model_name: str) -> Path:
+    config_path = get_snapshot_file(cache_dir, model_name, "config.yaml")
+    if config_path is None:
+        raise RuntimeError(f"Diarization model '{model_name}' has no local config.yaml in {cache_dir}.")
+
+    if model_name != "pyannote/speaker-diarization-3.1":
+        return config_path
+
+    segmentation_path = get_snapshot_file(cache_dir, "pyannote/segmentation-3.0", "pytorch_model.bin")
+    embedding_path = get_snapshot_file(cache_dir, "pyannote/wespeaker-voxceleb-resnet34-LM", "pytorch_model.bin")
+    if segmentation_path is None or embedding_path is None:
+        missing = missing_required_pyannote_cache_entries(cache_dir, model_name)
+        raise RuntimeError(
+            f"Diarization model '{model_name}' is not fully available in the local cache. "
+            f"Missing: {', '.join(missing)}."
+        )
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    params = config.setdefault("pipeline", {}).setdefault("params", {})
+    params["segmentation"] = str(segmentation_path)
+    params["embedding"] = str(embedding_path)
+
+    offline_dir = cache_dir / "offline-configs"
+    offline_dir.mkdir(parents=True, exist_ok=True)
+    offline_config_path = offline_dir / f"{model_name.replace('/', '--')}.yaml"
+    offline_config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return offline_config_path
+
+
+def normalize_pyannote_load_error(exc: Exception, model_name: str, *, local_files_only: bool) -> RuntimeError:
+    message = collect_exception_messages(exc)
+
+    if local_files_only:
+        if "localentrynotfounderror" in message or "cannot find the requested files in the local cache" in message:
+            return RuntimeError(
+                f"Diarization model '{model_name}' is not available in the local cache. "
+                "Run scripts/prod/prepare-diarization-model.ps1 with a Hugging Face token after accepting the pyannote model terms."
+            )
+        if "temporary failure in name resolution" in message or "name or service not known" in message:
+            return RuntimeError(
+                f"Diarization model '{model_name}' attempted a network lookup but runtime is offline. "
+                "Prepare the model cache first with scripts/prod/prepare-diarization-model.ps1."
+            )
+
+    return RuntimeError(str(exc))
+
+
+def collect_exception_messages(exc: BaseException) -> str:
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = f"{type(current).__name__}: {current}".strip().lower()
+        if text:
+            parts.append(text)
+        current = current.__cause__ or current.__context__
+    return " | ".join(parts)
