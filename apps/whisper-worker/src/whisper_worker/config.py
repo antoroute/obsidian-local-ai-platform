@@ -26,6 +26,8 @@ class WorkerSettings:
     diarization_model_cache_dir: str = "/models/diarization"
     diarization_min_speakers: int | None = None
     diarization_max_speakers: int | None = None
+    diarization_timeout_seconds: int | None = None
+    diarization_max_audio_seconds: int | None = None
 
 
 def get_settings() -> WorkerSettings:
@@ -50,6 +52,8 @@ def get_settings() -> WorkerSettings:
         diarization_model_cache_dir=os.getenv("DIARIZATION_MODEL_CACHE_DIR", "/models/diarization"),
         diarization_min_speakers=_parse_optional_int(os.getenv("DIARIZATION_MIN_SPEAKERS")),
         diarization_max_speakers=_parse_optional_int(os.getenv("DIARIZATION_MAX_SPEAKERS")),
+        diarization_timeout_seconds=_parse_optional_int(os.getenv("DIARIZATION_TIMEOUT_SECONDS")),
+        diarization_max_audio_seconds=_parse_optional_int(os.getenv("DIARIZATION_MAX_AUDIO_SECONDS")),
     )
 
 

@@ -71,6 +71,8 @@ def check_engine_command() -> int:
     print(f"DIARIZATION_MODEL={settings.diarization_model}")
     print(f"DIARIZATION_DEVICE={settings.diarization_device}")
     print(f"DIARIZATION_MODEL_CACHE_DIR={settings.diarization_model_cache_dir}")
+    print(f"DIARIZATION_TIMEOUT_SECONDS={settings.diarization_timeout_seconds}")
+    print(f"DIARIZATION_MAX_AUDIO_SECONDS={settings.diarization_max_audio_seconds}")
     try:
         result = check_engine(settings)
     except Exception as exc:

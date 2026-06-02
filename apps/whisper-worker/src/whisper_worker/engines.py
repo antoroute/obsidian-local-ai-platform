@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import multiprocessing
 from pathlib import Path
+import queue
+import time
 from typing import Any
 
 from whisper_worker.config import WorkerSettings
 from whisper_worker.diarization import apply_diarization_to_segments, create_diarization_engine
-from whisper_worker.diarization import DiarizationEngine
+from whisper_worker.diarization import DiarizationEngine, SpeakerTurn
 from whisper_worker.repositories import TranscriptResult, TranscriptSegment
 
 logger = logging.getLogger(__name__)
@@ -38,14 +41,43 @@ class DiarizingTranscriptionEngine(TranscriptionEngine):
         self._diarization_engine_loaded = False
 
     def transcribe(self, input_path: Path, *, transcription_language: str | None = None) -> TranscriptResult:
+        whisper_started_at = time.monotonic()
         transcript = self._base_engine.transcribe(input_path, transcription_language=transcription_language)
+        logger.info("Whisper transcription completed in %.2fs", time.monotonic() - whisper_started_at)
         try:
-            diarization_engine = self._get_diarization_engine()
-            if diarization_engine is None:
+            if not self._settings.diarization_enabled:
                 return transcript
-            logger.info("Running diarization for audio duration %.2fs", transcript.duration)
-            turns = diarization_engine.diarize(input_path)
-            logger.info("Diarization completed with %s speaker turns", len(turns))
+            if should_skip_diarization_for_duration(transcript.duration, self._settings.diarization_max_audio_seconds):
+                logger.warning(
+                    "Skipping diarization for audio duration %.2fs because DIARIZATION_MAX_AUDIO_SECONDS=%s",
+                    transcript.duration,
+                    self._settings.diarization_max_audio_seconds,
+                )
+                return TranscriptResult(
+                    text=transcript.text,
+                    language=transcript.language,
+                    duration=transcript.duration,
+                    segments=transcript.segments,
+                    diarization_enabled=True,
+                    diarization_status="failed",
+                )
+
+            logger.info(
+                "Running diarization with timeout %ss for audio duration %.2fs",
+                self._settings.diarization_timeout_seconds or "disabled",
+                transcript.duration,
+            )
+            diarization_started_at = time.monotonic()
+            turns = run_diarization_with_timeout(
+                input_path,
+                self._settings,
+                timeout_seconds=self._settings.diarization_timeout_seconds,
+            )
+            logger.info(
+                "Diarization completed with %s speaker turns in %.2fs",
+                len(turns),
+                time.monotonic() - diarization_started_at,
+            )
             return TranscriptResult(
                 text=transcript.text,
                 language=transcript.language,
@@ -70,6 +102,91 @@ class DiarizingTranscriptionEngine(TranscriptionEngine):
             self._diarization_engine = create_diarization_engine(self._settings)
             self._diarization_engine_loaded = True
         return self._diarization_engine
+
+
+class DiarizationTimeoutError(TimeoutError):
+    pass
+
+
+def should_skip_diarization_for_duration(duration: float, max_audio_seconds: int | None) -> bool:
+    return max_audio_seconds is not None and max_audio_seconds > 0 and duration > max_audio_seconds
+
+
+def run_diarization_with_timeout(
+    input_path: Path,
+    settings: WorkerSettings,
+    *,
+    timeout_seconds: int | None,
+    runner: Any = None,
+) -> list[SpeakerTurn]:
+    selected_runner = runner or run_diarization_job
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return selected_runner(input_path, settings)
+
+    # Use spawn instead of Linux fork: PyTorch/CUDA can deadlock or fail when a
+    # child process is forked after the parent has already used CUDA for Whisper.
+    multiprocessing_context = multiprocessing.get_context("spawn")
+    result_queue: multiprocessing.Queue[dict[str, object]] = multiprocessing_context.Queue(maxsize=1)
+    process = multiprocessing_context.Process(
+        target=diarization_process_entry,
+        args=(str(input_path), settings, result_queue, selected_runner),
+        daemon=True,
+    )
+    process.start()
+    process.join(timeout_seconds)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=10)
+        raise DiarizationTimeoutError(f"Diarization exceeded {timeout_seconds} seconds.")
+
+    try:
+        result = result_queue.get_nowait()
+    except queue.Empty as exc:
+        raise RuntimeError(f"Diarization process exited without a result. Exit code: {process.exitcode}") from exc
+
+    if result.get("status") == "ok":
+        return [
+            SpeakerTurn(
+                start=float(item["start"]),
+                end=float(item["end"]),
+                speaker=str(item["speaker"]),
+            )
+            for item in result.get("turns", [])
+            if isinstance(item, dict)
+        ]
+
+    raise RuntimeError(str(result.get("error") or "Diarization failed."))
+
+
+def diarization_process_entry(
+    input_path: str,
+    settings: WorkerSettings,
+    result_queue: multiprocessing.Queue[dict[str, object]],
+    runner: Any,
+) -> None:
+    try:
+        turns = runner(Path(input_path), settings)
+        result_queue.put(
+            {
+                "status": "ok",
+                "turns": [
+                    {"start": turn.start, "end": turn.end, "speaker": turn.speaker}
+                    for turn in turns
+                ],
+            }
+        )
+    except Exception as exc:
+        result_queue.put({"status": "error", "error": str(exc)})
+
+
+def run_diarization_job(input_path: Path, settings: WorkerSettings) -> list[SpeakerTurn]:
+    diarization_engine = create_diarization_engine(settings)
+    if diarization_engine is None:
+        return []
+    return diarization_engine.diarize(input_path)
 
 
 @dataclass(frozen=True)

@@ -28,6 +28,8 @@ RUN pip install --no-cache-dir .[faster-whisper] \
     && if [ "$INSTALL_DIARIZATION" = "true" ]; then \
         pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 torch==2.3.1 torchaudio==2.3.1; \
         pip install --no-cache-dir .[diarization]; \
+        pip uninstall -y onnxruntime; \
+        pip install --no-cache-dir onnxruntime-gpu==1.18.1; \
     fi
 
 CMD ["python", "-m", "whisper_worker"]

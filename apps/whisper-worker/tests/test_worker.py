@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -15,12 +16,15 @@ from whisper_worker.diarization import (
     required_pyannote_dependency_models,
 )
 from whisper_worker.engines import (
+    DiarizationTimeoutError,
     DiarizingTranscriptionEngine,
     FakeTranscriptionEngine,
     FasterWhisperEngine,
     check_engine,
     create_engine,
     normalize_faster_whisper_error,
+    run_diarization_with_timeout,
+    should_skip_diarization_for_duration,
 )
 from whisper_worker.models import Job
 from whisper_worker.processor import process_audio_job
@@ -63,6 +67,12 @@ def seed_job(session_factory, input_path: Path, job_id: str = "job-1", metadata:
         )
         session.add(job)
         session.commit()
+
+
+def slow_diarization_runner(input_path: Path, settings: WorkerSettings) -> list[SpeakerTurn]:
+    del input_path, settings
+    time.sleep(10)
+    return [SpeakerTurn(start=0.0, end=1.0, speaker="Speaker 1")]
 
 
 def test_fake_engine_returns_deterministic_transcript(tmp_path) -> None:
@@ -302,29 +312,62 @@ def test_engine_factory_wraps_diarization_when_enabled(tmp_path) -> None:
     assert isinstance(engine, DiarizingTranscriptionEngine)
 
 
-def test_diarization_engine_is_cached_between_jobs(tmp_path, monkeypatch) -> None:
-    class CountingDiarizationEngine:
+def test_diarization_adds_speaker_labels_without_timeout(tmp_path, monkeypatch) -> None:
+    class FastDiarizationEngine:
         def diarize(self, input_path: Path):
             return [SpeakerTurn(start=0.0, end=1.0, speaker="Speaker 1")]
 
-    calls = 0
-
     def fake_create_diarization_engine(settings):
-        nonlocal calls
-        calls += 1
-        return CountingDiarizationEngine()
+        return FastDiarizationEngine()
 
     monkeypatch.setattr("whisper_worker.engines.create_diarization_engine", fake_create_diarization_engine)
-    engine = DiarizingTranscriptionEngine(FakeTranscriptionEngine(), make_settings(tmp_path))
+    settings = WorkerSettings(**{**make_settings(tmp_path).__dict__, "diarization_enabled": True})
+    engine = DiarizingTranscriptionEngine(FakeTranscriptionEngine(), settings)
 
-    first = engine.transcribe(tmp_path / "a.mp3")
-    second = engine.transcribe(tmp_path / "b.mp3")
+    result = engine.transcribe(tmp_path / "a.mp3")
 
-    assert calls == 1
-    assert first.diarization_status == "completed"
-    assert second.diarization_status == "completed"
-    assert first.segments[0].speaker == "Speaker 1"
-    assert second.segments[0].speaker == "Speaker 1"
+    assert result.diarization_status == "completed"
+    assert result.segments[0].speaker == "Speaker 1"
+
+
+def test_diarization_timeout_preserves_whisper_transcript(tmp_path) -> None:
+    settings = make_settings(tmp_path)
+
+    try:
+        run_diarization_with_timeout(
+            tmp_path / "input.mp3",
+            settings,
+            timeout_seconds=1,
+            runner=slow_diarization_runner,
+        )
+    except DiarizationTimeoutError as exc:
+        assert "exceeded 1 seconds" in str(exc)
+    else:
+        raise AssertionError("Expected diarization timeout")
+
+
+def test_diarization_timeout_marks_diarization_failed_without_failing_transcription(tmp_path, monkeypatch) -> None:
+    def fake_run_diarization_with_timeout(input_path, settings, *, timeout_seconds):
+        del input_path, settings, timeout_seconds
+        raise DiarizationTimeoutError("Diarization exceeded 1 seconds.")
+
+    monkeypatch.setattr("whisper_worker.engines.run_diarization_with_timeout", fake_run_diarization_with_timeout)
+    settings = WorkerSettings(**{**make_settings(tmp_path).__dict__, "diarization_enabled": True})
+    engine = DiarizingTranscriptionEngine(FakeTranscriptionEngine(), settings)
+
+    result = engine.transcribe(tmp_path / "input.mp3")
+
+    assert result.text == "Fake transcript for testing."
+    assert result.diarization_enabled is True
+    assert result.diarization_status == "failed"
+    assert result.segments[0].speaker is None
+
+
+def test_diarization_max_audio_seconds_skips_long_audio() -> None:
+    assert should_skip_diarization_for_duration(3618.6, 3600) is True
+    assert should_skip_diarization_for_duration(120.0, 3600) is False
+    assert should_skip_diarization_for_duration(3618.6, None) is False
+    assert should_skip_diarization_for_duration(3618.6, 0) is False
 
 
 def test_engine_factory_rejects_unknown_value(tmp_path) -> None:
