@@ -187,6 +187,7 @@ services:
 
   redis:
     image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    user: redis
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", "300", "10"]
     networks:
       - ai_backend
