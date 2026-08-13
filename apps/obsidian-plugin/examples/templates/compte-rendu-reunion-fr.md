@@ -4,15 +4,6 @@ language: fr
 type: meeting_summary
 description: Compte rendu direct, compact et utile avec decisions, actions et incertitudes.
 ---
----
-type: meeting_summary
-source_meeting:
-source_audio:
-model:
-transcription_language:
-output_language:
-tags: [meeting, compte-rendu]
----
 # Compte rendu de reunion
 
 Objectif : produire un compte rendu direct, compact et utile.

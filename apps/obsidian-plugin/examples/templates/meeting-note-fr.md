@@ -1,16 +1,8 @@
 ---
 name: Note de reunion
 language: fr
-type: meeting
+type: meeting_note
 description: Note source pour une reunion avec notes manuelles.
----
----
-type: meeting
-created: {{date}}
-date: {{date}}
-org:
-location:
-tags: [meeting]
 ---
 # {{title}}
 

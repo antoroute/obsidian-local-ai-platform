@@ -4,15 +4,6 @@ language: en
 type: meeting_summary
 description: Standard English minutes with summary, decisions, actions, open points and uncertainties.
 ---
----
-type: meeting_summary
-source_meeting:
-source_audio:
-model:
-transcription_language:
-output_language:
-tags: [meeting, minutes]
----
 # Meeting minutes
 
 Goal: produce concrete, useful and information-rich meeting minutes.

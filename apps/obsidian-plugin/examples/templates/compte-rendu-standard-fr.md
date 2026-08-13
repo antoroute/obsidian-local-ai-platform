@@ -1,7 +1,7 @@
 ---
 name: Compte rendu standard
 language: fr
-type: meeting
+type: meeting_summary
 description: Compte rendu direct en francais avec decisions, actions et incertitudes.
 ---
 # Compte rendu

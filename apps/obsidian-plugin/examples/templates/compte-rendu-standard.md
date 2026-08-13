@@ -1,3 +1,9 @@
+---
+name: Note summary
+language: en
+type: note_summary
+description: General-purpose structured summary for the current note.
+---
 # Summary
 
 ## Context

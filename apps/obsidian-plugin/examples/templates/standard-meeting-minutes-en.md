@@ -1,7 +1,7 @@
 ---
 name: Standard meeting minutes
 language: en
-type: meeting
+type: meeting_summary
 description: Direct English meeting minutes with decisions, actions, and uncertainties.
 ---
 # Meeting minutes

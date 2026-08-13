@@ -18,20 +18,22 @@
 } from "obsidian";
 
 const DASHBOARD_VIEW_TYPE = "notre-compagnon-dashboard";
-const DEFAULT_TEMPLATE_FILE = "compte-rendu-standard-fr.md";
+const DEFAULT_TEMPLATE_FILE = "note-summary-fr.md";
 const DEFAULT_TEMPLATES_FOLDER = "Note Compagnon/Templates";
 const DEFAULT_OUTPUT_FOLDER = "Note Compagnon/Comptes rendus";
 const DEFAULT_MEETINGS_FOLDER = "Note Compagnon/Reunions";
 const DEFAULT_RECORDINGS_FOLDER = "Note Compagnon/Enregistrements";
-const DEFAULT_MODEL = "qwen2.5:14b";
+const DEFAULT_MODEL = "qwen3:8b";
 const AUDIO_POLL_INTERVAL_MS = 3_000;
 const AUDIO_POLL_TIMEOUT_MS = 30 * 60 * 1_000;
 const DEFAULT_RECORDING_EXTENSION = ".webm";
 const DEFAULT_RECORDING_MIME_TYPE = "audio/webm";
 const SUPPORTED_AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".webm", ".ogg"]);
-const PLUGIN_BUILD_ID = "0.1.1-transcript-parser";
+const LEGACY_DEFAULT_MODELS = new Set(["qwen2.5:7b", "qwen2.5:14b"]);
+const PLUGIN_BUILD_ID = "0.1.2-template-stability";
 type TemplateInstallSet = "minimal" | "fr" | "en" | "all";
-type TemplateGroup = "meeting_note" | "meeting_summary" | "actions" | "technical" | "client" | "other";
+type TemplatePurpose = "note_summary" | "meeting_summary";
+type TemplateGroup = "note_summary" | "meeting_note" | "meeting_summary" | "actions" | "technical" | "client" | "other";
 type AssistantResponseMode = "simple" | "current_note" | "vault";
 type SettingsTabId = "general" | "assistant" | "meetings" | "audio" | "vault" | "templates" | "advanced";
 type RecordingSource = "microphone_only" | "computer_audio_only" | "microphone_plus_computer_audio" | "experimental_system_capture" | "selected_audio_input";
@@ -43,8 +45,42 @@ type RecordingSourceUsed =
   | "experimental_system_capture"
   | "experimental_system_audio_unavailable"
   | "selected_audio_input";
-const MINIMAL_RECOMMENDED_TEMPLATE_FILES = new Set(["meeting-note-fr.md", "compte-rendu-reunion-fr.md", "meeting-note-en.md", "meeting-minutes-en.md"]);
+const MINIMAL_RECOMMENDED_TEMPLATE_FILES = new Set([
+  "note-summary-fr.md",
+  "meeting-note-fr.md",
+  "compte-rendu-reunion-fr.md",
+  "note-summary-en.md",
+  "meeting-note-en.md",
+  "meeting-minutes-en.md",
+]);
 const RECOMMENDED_TEMPLATES: Array<{ fileName: string; content: string; language: "fr" | "en"; minimal: boolean }> = [
+  {
+    fileName: "note-summary-fr.md",
+    language: "fr",
+    minimal: true,
+    content: `---
+name: Resume de note
+language: fr
+type: note_summary
+description: Resume structure d'une note, sans supposer qu'il s'agit d'une reunion.
+---
+# Resume
+
+Utiliser uniquement le contenu de la note source. Ne rien inventer.
+Conserver les noms propres, chiffres, dates et contraintes importantes.
+Supprimer toute section qui ne contient aucune information utile.
+
+## Idee principale
+
+## Points cles
+
+## Decisions ou conclusions
+
+## Actions ou prochaines etapes
+
+## Questions ouvertes
+`,
+  },
   {
     fileName: "meeting-note-fr.md",
     language: "fr",
@@ -52,16 +88,8 @@ const RECOMMENDED_TEMPLATES: Array<{ fileName: string; content: string; language
     content: `---
 name: Note de reunion
 language: fr
-type: meeting
+type: meeting_note
 description: Note source pour une reunion avec notes manuelles.
----
----
-type: meeting
-created: {{date}}
-date: {{date}}
-org:
-location:
-tags: [meeting]
 ---
 # {{title}}
 
@@ -84,15 +112,6 @@ language: fr
 type: meeting_summary
 description: Compte rendu direct, compact et utile avec decisions, actions et incertitudes.
 ---
----
-type: meeting_summary
-source_meeting:
-source_audio:
-model:
-transcription_language:
-output_language:
-tags: [meeting, compte-rendu]
----
 # Compte rendu de reunion
 
 Objectif : produire un compte rendu direct, compact et utile.
@@ -113,22 +132,41 @@ Actions au format simple : Action | Responsable si connu | Echeance si connue.
 `,
   },
   {
+    fileName: "note-summary-en.md",
+    language: "en",
+    minimal: true,
+    content: `---
+name: Note summary
+language: en
+type: note_summary
+description: Structured summary of a note without assuming that it is a meeting.
+---
+# Summary
+
+Use only the source note. Do not invent information.
+Preserve important names, numbers, dates, and constraints.
+Remove any section that has no useful supported content.
+
+## Main idea
+
+## Key points
+
+## Decisions or conclusions
+
+## Actions or next steps
+
+## Open questions
+`,
+  },
+  {
     fileName: "meeting-note-en.md",
     language: "en",
     minimal: true,
     content: `---
 name: Meeting note
 language: en
-type: meeting
+type: meeting_note
 description: Source note for a meeting with manual notes.
----
----
-type: meeting
-created: {{date}}
-date: {{date}}
-org:
-location:
-tags: [meeting]
 ---
 # {{title}}
 
@@ -150,15 +188,6 @@ name: Meeting minutes
 language: en
 type: meeting_summary
 description: Standard English minutes with summary, decisions, actions, open points and uncertainties.
----
----
-type: meeting_summary
-source_meeting:
-source_audio:
-model:
-transcription_language:
-output_language:
-tags: [meeting, minutes]
 ---
 # Meeting minutes
 
@@ -270,8 +299,64 @@ Do not invent owners or due dates.
 - Action | Owner if known | Due date if known | Source or uncertainty
 `,
   },
+  {
+    fileName: "reunion-technique-fr.md",
+    language: "fr",
+    minimal: false,
+    content: `---
+name: Reunion technique
+language: fr
+type: technical_meeting
+description: Compte rendu technique avec architecture, decisions, risques et actions.
+---
+# Compte rendu technique
+
+Utiliser uniquement les sources fournies et ne rien inventer.
+Privilegier les faits utiles a la mise en oeuvre.
+
+## Contexte et objectif
+
+## Architecture ou composants abordes
+
+## Decisions techniques
+
+## Actions techniques
+
+## Risques et blocages
+
+## Questions ouvertes
+`,
+  },
+  {
+    fileName: "technical-meeting-en.md",
+    language: "en",
+    minimal: false,
+    content: `---
+name: Technical meeting
+language: en
+type: technical_meeting
+description: Technical minutes focused on architecture, decisions, risks, and actions.
+---
+# Technical meeting minutes
+
+Use only the provided sources and do not invent information.
+Prioritize facts that are useful for implementation.
+
+## Context and objective
+
+## Architecture or components discussed
+
+## Technical decisions
+
+## Technical actions
+
+## Risks and blockers
+
+## Open questions
+`,
+  },
 ];
-const FALLBACK_TEMPLATE = `# Meeting report
+const FALLBACK_MEETING_TEMPLATE = `# Meeting report
 
 Goal: produce an information-rich, concrete and useful meeting report in the requested output language.
 The report must be at least as informative as the manual notes.
@@ -296,6 +381,22 @@ Action | Owner if known | Due date if known
 ## Open points
 
 ## Uncertainties or contradictions
+`;
+const FALLBACK_NOTE_SUMMARY_TEMPLATE = `# Summary
+
+Use only information found in the source note. Do not invent.
+Preserve important names, numbers, dates, constraints, and nuances.
+Remove sections that have no useful supported content.
+
+## Main idea
+
+## Key points
+
+## Decisions or conclusions
+
+## Actions or next steps
+
+## Open questions
 `;
 
 class UserFacingError extends Error {}
@@ -786,6 +887,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const loaded = await this.loadData();
     this.settings = { ...DEFAULT_SETTINGS, ...(loaded as Partial<PluginSettings> | null) };
+    if (LEGACY_DEFAULT_MODELS.has(this.settings.defaultModel.trim())) {
+      this.settings.defaultModel = DEFAULT_MODEL;
+    }
     if (this.settings.recordingSource === ("system_audio_only" as RecordingSource)) {
       this.settings.recordingSource = "experimental_system_capture";
     }
@@ -848,11 +952,11 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
       const apiBaseUrl = this.getApiBaseUrl();
       const apiToken = this.getApiToken();
-      const templateChoice = await this.chooseTemplate();
+      const templateChoice = await this.chooseTemplate("note_summary");
       const payload: SummarizeRequestPayload = {
         title: activeFile.basename,
         note_content: noteContent,
-        template: this.prepareTemplateForRequest(templateChoice),
+        template: this.prepareTemplateForRequest(templateChoice, "note_summary"),
         model: this.getDefaultModel(),
       };
 
@@ -886,7 +990,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         detectedSourceNoteFile: activeNote?.extension === "md" ? activeNote : undefined,
         defaultOutputLanguage: this.getOutputLanguage(),
       });
-      const templateChoice = await this.chooseTemplate();
+      const templateChoice = await this.chooseTemplate("meeting_summary");
       const generationMode = await chooseMeetingGenerationMode(this.app);
 
       const savedAudio = await this.resolveAudioFileForVault(audioFile);
@@ -912,7 +1016,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         title: metadata.title,
         manual_notes: metadata.manualNotes,
         participants: [],
-        template: this.prepareTemplateForRequest(templateChoice),
+        template: this.prepareTemplateForRequest(templateChoice, "meeting_summary"),
         model: this.getDefaultModel(),
         output_language: metadata.outputLanguage,
         generation_mode: generationMode,
@@ -1036,7 +1140,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       new Notice(`Recording saved: ${savedAudio.file.path}`);
       const sourceNote = await this.completeMeetingSourceNote(recording, savedAudio.file);
       const manualNotes = await this.app.vault.read(sourceNote);
-      const templateChoice = await this.chooseTemplate();
+      const templateChoice = await this.chooseTemplate("meeting_summary");
       const generationMode = await chooseMeetingGenerationMode(this.app);
 
       const apiBaseUrl = this.getApiBaseUrl();
@@ -1058,7 +1162,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         title: recording.title,
         manual_notes: manualNotes,
         participants: [],
-        template: this.prepareTemplateForRequest(templateChoice),
+        template: this.prepareTemplateForRequest(templateChoice, "meeting_summary"),
         model: this.getDefaultModel(),
         output_language: this.getOutputLanguage(),
         generation_mode: generationMode,
@@ -1248,13 +1352,13 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return preferred === "auto" ? "all" : preferred;
   }
 
-  prepareTemplateForRequest(templateChoice: TemplateChoice): string {
+  prepareTemplateForRequest(templateChoice: TemplateChoice, purpose: TemplatePurpose): string {
     return [
-      buildMeetingGenerationIntent(templateChoice),
+      buildGenerationIntent(templateChoice, purpose),
       templateChoice.templateContent.trim(),
-      buildTranscriptionLanguageHint(this.getTranscriptionLanguage()),
+      purpose === "meeting_summary" ? buildTranscriptionLanguageHint(this.getTranscriptionLanguage()) : null,
       buildLanguageInstruction(this.getOutputLanguage()),
-    ].join("\n\n").trim();
+    ].filter((section): section is string => section !== null).join("\n\n").trim();
   }
 
   getConfigurationStatus(): { label: string; isReady: boolean } {
@@ -1494,20 +1598,29 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return { stream: systemAudioStream, extraStreams: [], audioContext: null, recordingSourceUsed: "experimental_system_capture" };
   }
 
-  async chooseTemplate(): Promise<TemplateChoice> {
-    const availableTemplates = await this.listTemplateChoices();
-    return chooseTemplateWithModal(this.app, availableTemplates, this.getTemplateFilterLanguage());
+  async chooseTemplate(purpose: TemplatePurpose): Promise<TemplateChoice> {
+    const availableTemplates = (await this.listTemplateChoices()).filter((choice) => isTemplateCompatible(choice, purpose));
+    return chooseTemplateWithModal(this.app, availableTemplates, this.getTemplateFilterLanguage(), purpose);
   }
 
   async listTemplateChoices(): Promise<TemplateChoice[]> {
     const choices: TemplateChoice[] = [
       {
-        label: "Built-in default template",
-        templateContent: FALLBACK_TEMPLATE,
+        label: "Built-in note summary",
+        templateContent: FALLBACK_NOTE_SUMMARY_TEMPLATE,
+        sourcePath: null,
+        description: "General-purpose note summary that does not assume a meeting.",
+        language: null,
+        type: "note_summary",
+        group: "note_summary",
+      },
+      {
+        label: "Built-in meeting report",
+        templateContent: FALLBACK_MEETING_TEMPLATE,
         sourcePath: null,
         description: "Default information-rich meeting report. Use this if you are unsure.",
-        language: "en",
-        type: "meeting",
+        language: null,
+        type: "meeting_summary",
         group: "meeting_summary",
       },
     ];
@@ -1525,14 +1638,15 @@ export default class LocalAiPlatformPlugin extends Plugin {
     for (const file of markdownFiles) {
       const content = await this.app.vault.read(file);
       const parsedTemplate = parseTemplateContent(content);
+      const group = inferTemplateGroup(parsedTemplate.metadata.type, file.basename);
       choices.push({
         label: parsedTemplate.metadata.name || file.basename,
-        templateContent: parsedTemplate.body.trim() ? parsedTemplate.body : FALLBACK_TEMPLATE,
+        templateContent: parsedTemplate.body.trim() ? parsedTemplate.body : getFallbackTemplate(group),
         sourcePath: file.path,
         description: parsedTemplate.metadata.description,
         language: parsedTemplate.metadata.language,
         type: parsedTemplate.metadata.type,
-        group: inferTemplateGroup(parsedTemplate.metadata.type, file.basename),
+        group,
       });
     }
 
@@ -3785,21 +3899,31 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
 class TemplatePickerModal extends Modal {
   private readonly choices: TemplateChoice[];
   private readonly onChoose: (choice: TemplateChoice) => void;
+  private readonly purpose: TemplatePurpose;
   private languageFilter: "all" | "fr" | "en";
 
-  constructor(app: App, choices: TemplateChoice[], languageFilter: "all" | "fr" | "en", onChoose: (choice: TemplateChoice) => void) {
+  constructor(
+    app: App,
+    choices: TemplateChoice[],
+    languageFilter: "all" | "fr" | "en",
+    purpose: TemplatePurpose,
+    onChoose: (choice: TemplateChoice) => void,
+  ) {
     super(app);
     this.choices = choices;
     this.languageFilter = languageFilter;
+    this.purpose = purpose;
     this.onChoose = onChoose;
   }
 
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Choisir le type de compte rendu" });
+    contentEl.createEl("h2", { text: this.purpose === "note_summary" ? "Choisir le type de resume" : "Choisir le type de compte rendu" });
     contentEl.createEl("p", {
-      text: "Le template guide le niveau de detail et les sections du CR. Pour une reunion longue, choisis un template standard/detaille plutot qu'un template actions-only.",
+      text: this.purpose === "note_summary"
+        ? "Le template guide les informations et les sections a conserver dans le resume de la note."
+        : "Le template guide le niveau de detail et les sections du CR. Pour une reunion longue, choisis un template standard/detaille plutot qu'un template actions-only.",
     });
     new Setting(contentEl)
       .setName("Filtre langue")
@@ -4584,24 +4708,16 @@ function parseTemplateContent(content: string): {
   metadata: { name: string | null; language: string | null; type: string | null; description: string | null };
   body: string;
 } {
-  const normalized = content.replace(/^\uFEFF/, "");
-  if (!normalized.startsWith("---\n")) {
+  const normalized = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+  const frontmatterMatch = normalized.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
+  if (!frontmatterMatch) {
     return {
       metadata: { name: null, language: null, type: null, description: null },
       body: normalized,
     };
   }
-
-  const closingIndex = normalized.indexOf("\n---", 4);
-  if (closingIndex < 0) {
-    return {
-      metadata: { name: null, language: null, type: null, description: null },
-      body: normalized,
-    };
-  }
-
-  const frontmatter = normalized.slice(4, closingIndex);
-  const body = normalized.slice(closingIndex + 4).replace(/^\r?\n/, "");
+  const frontmatter = frontmatterMatch[1];
+  const body = stripLegacyTemplateOutputFrontmatter(normalized.slice(frontmatterMatch[0].length));
   const metadata = { name: null, language: null, type: null, description: null } as {
     name: string | null;
     language: string | null;
@@ -4622,6 +4738,12 @@ function parseTemplateContent(content: string): {
   }
 
   return { metadata, body };
+}
+
+function stripLegacyTemplateOutputFrontmatter(content: string): string {
+  const normalized = content.replace(/^\s+/, "");
+  const duplicateFrontmatter = normalized.match(/^---\n[\s\S]*?\n---(?:\n|$)/);
+  return duplicateFrontmatter ? normalized.slice(duplicateFrontmatter[0].length) : normalized;
 }
 
 function parseSimpleFrontmatter(content: string): { frontmatter: Record<string, unknown>; body: string } {
@@ -4721,8 +4843,18 @@ function filterRecommendedTemplates(installSet: TemplateInstallSet): Array<{ fil
 }
 
 function inferTemplateGroup(type: string | null, fileName: string): TemplateGroup {
-  const normalized = `${type ?? ""} ${fileName}`.toLowerCase();
-  if (normalized.includes("meeting_note") || normalized.includes("meeting-note") || normalized.includes("type: meeting")) {
+  const normalizedType = (type ?? "").trim().toLowerCase();
+  const normalizedFileName = fileName.toLowerCase();
+  const normalized = `${normalizedType} ${normalizedFileName}`;
+  if (
+    normalizedType === "note_summary" ||
+    normalizedFileName.includes("note-summary") ||
+    normalizedFileName.includes("resume-note") ||
+    normalizedFileName === "compte-rendu-standard.md"
+  ) {
+    return "note_summary";
+  }
+  if (normalizedType === "meeting_note" || normalizedType === "meeting" || normalizedFileName.includes("meeting-note")) {
     return "meeting_note";
   }
   if (normalized.includes("action")) {
@@ -4740,14 +4872,26 @@ function inferTemplateGroup(type: string | null, fileName: string): TemplateGrou
   return "other";
 }
 
+function isTemplateCompatible(choice: TemplateChoice, purpose: TemplatePurpose): boolean {
+  if (purpose === "note_summary") {
+    return choice.group === "note_summary";
+  }
+  return ["meeting_summary", "actions", "technical", "client"].includes(choice.group);
+}
+
+function getFallbackTemplate(group: TemplateGroup): string {
+  return group === "note_summary" || group === "other" ? FALLBACK_NOTE_SUMMARY_TEMPLATE : FALLBACK_MEETING_TEMPLATE;
+}
+
 function groupTemplateChoices(choices: TemplateChoice[]): Array<[TemplateGroup, TemplateChoice[]]> {
-  const order: TemplateGroup[] = ["meeting_note", "meeting_summary", "actions", "technical", "client", "other"];
+  const order: TemplateGroup[] = ["note_summary", "meeting_note", "meeting_summary", "actions", "technical", "client", "other"];
   return order
     .map((group): [TemplateGroup, TemplateChoice[]] => [group, choices.filter((choice) => choice.group === group)])
     .filter(([, groupedChoices]) => groupedChoices.length > 0);
 }
 
 function formatTemplateGroup(group: TemplateGroup): string {
+  if (group === "note_summary") return "Note summaries";
   if (group === "meeting_note") return "Meeting notes";
   if (group === "meeting_summary") return "Meeting summaries";
   if (group === "actions") return "Actions";
@@ -4757,6 +4901,9 @@ function formatTemplateGroup(group: TemplateGroup): string {
 }
 
 function formatTemplateUsageHint(choice: TemplateChoice): string {
+  if (choice.group === "note_summary") {
+    return "Usage: resume d'une note courante, sans supposer qu'il s'agit d'une reunion.";
+  }
   if (choice.group === "actions") {
     return "Usage: extrait uniquement les actions, pas adapte pour un CR complet.";
   }
@@ -4797,7 +4944,16 @@ function buildLanguageInstruction(outputLanguage: PluginSettings["outputLanguage
   ].join("\n");
 }
 
-function buildMeetingGenerationIntent(templateChoice: TemplateChoice): string {
+function buildGenerationIntent(templateChoice: TemplateChoice, purpose: TemplatePurpose): string {
+  if (purpose === "note_summary") {
+    return [
+      "## Intention de generation",
+      "Mode : resume de la note source.",
+      "Ne pas traiter la note comme une reunion sauf si son contenu l'indique explicitement.",
+      "Preserver les faits, noms, chiffres, dates, contraintes et nuances importants.",
+      "Ne rien inventer et supprimer les sections sans information utile.",
+    ].join("\n");
+  }
   if (templateChoice.group === "actions") {
     return [
       "## Intention de generation",
@@ -5103,7 +5259,7 @@ function buildMeetingSourceNote(input: {
   startedAt: Date;
 }): string {
   return `---
-type: meeting
+type: meeting_note
 created: ${formatDate(input.startedAt)}
 date: ${formatLocalDateTime(input.startedAt)}
 org:
@@ -5261,10 +5417,15 @@ function yamlQuote(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-function chooseTemplateWithModal(app: App, choices: TemplateChoice[], languageFilter: "all" | "fr" | "en"): Promise<TemplateChoice> {
+function chooseTemplateWithModal(
+  app: App,
+  choices: TemplateChoice[],
+  languageFilter: "all" | "fr" | "en",
+  purpose: TemplatePurpose,
+): Promise<TemplateChoice> {
   return new Promise((resolve, reject) => {
     let resolved = false;
-    const modal = new TemplatePickerModal(app, choices, languageFilter, (choice) => {
+    const modal = new TemplatePickerModal(app, choices, languageFilter, purpose, (choice) => {
       resolved = true;
       resolve(choice);
     });
