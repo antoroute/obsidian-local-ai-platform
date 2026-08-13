@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import subprocess
+import tempfile
 from collections.abc import Iterator
 from typing import Any
 import yaml
@@ -47,9 +49,23 @@ class PyannoteDiarizationEngine(DiarizationEngine):
         return turns
 
 
+class NemoSortformerDiarizationEngine(DiarizationEngine):
+    def __init__(self, model: Any) -> None:
+        self._model = model
+
+    def diarize(self, input_path: Path) -> list[SpeakerTurn]:
+        with tempfile.TemporaryDirectory(prefix="sortformer-audio-") as temp_dir:
+            wav_path = Path(temp_dir) / f"{input_path.stem}.wav"
+            convert_audio_for_sortformer(input_path, wav_path)
+            predicted_segments = self._model.diarize(audio=str(wav_path), batch_size=1)
+        return parse_sortformer_segments(predicted_segments)
+
+
 def create_diarization_engine(settings: WorkerSettings) -> DiarizationEngine | None:
     if not settings.diarization_enabled:
         return None
+    if settings.diarization_provider == "nemo_sortformer":
+        return create_nemo_sortformer_engine(settings)
     if settings.diarization_provider != "pyannote":
         raise ValueError(f"Unsupported diarization provider: {settings.diarization_provider}")
 
@@ -97,6 +113,105 @@ def create_diarization_engine(settings: WorkerSettings) -> DiarizationEngine | N
     )
 
 
+def create_nemo_sortformer_engine(settings: WorkerSettings) -> DiarizationEngine:
+    if settings.diarization_device != "cuda":
+        raise RuntimeError("DIARIZATION_PROVIDER=nemo_sortformer requires DIARIZATION_DEVICE=cuda.")
+
+    ensure_python_int_digit_compat()
+    try:
+        from nemo.collections.asr.models.sortformer_diar_models import SortformerEncLabelModel
+    except ImportError as exc:
+        raise RuntimeError(
+            "DIARIZATION_PROVIDER=nemo_sortformer requires the NeMo ASR dependencies to be installed."
+        ) from exc
+
+    model_path = get_sortformer_model_path(Path(settings.diarization_model_cache_dir), settings.diarization_model)
+    try:
+        model = SortformerEncLabelModel.restore_from(
+            restore_path=str(model_path),
+            map_location="cuda",
+            strict=False,
+        )
+        model.eval()
+    except Exception as exc:
+        raise RuntimeError(f"Could not load NeMo Sortformer model from {model_path}: {exc}") from exc
+    return NemoSortformerDiarizationEngine(model)
+
+
+def get_sortformer_model_path(cache_dir: Path, model_name: str) -> Path:
+    model_file = Path(model_name)
+    if model_file.exists() and model_file.is_file():
+        return model_file
+
+    repo_cache_dir = cache_dir / f"models--{model_name.replace('/', '--')}"
+    candidates = list(repo_cache_dir.rglob("*.nemo")) if repo_cache_dir.exists() else []
+    if not candidates:
+        candidates = list(cache_dir.rglob("*.nemo")) if cache_dir.exists() else []
+    if not candidates:
+        raise RuntimeError(
+            f"NeMo Sortformer model '{model_name}' is not available in {cache_dir}. "
+            "Run scripts/prod/prepare-sortformer-model.ps1 before starting the worker."
+        )
+    return sorted(candidates, key=lambda path: len(str(path)))[0]
+
+
+def convert_audio_for_sortformer(input_path: Path, wav_path: Path) -> None:
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(input_path),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        str(wav_path),
+    ]
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"Could not convert audio for NeMo Sortformer: {exc.stderr.strip()}") from exc
+
+
+def parse_sortformer_segments(predicted_segments: Any) -> list[SpeakerTurn]:
+    # NeMo may return either a flat list for one file or a list per input file.
+    segments = predicted_segments
+    if isinstance(segments, tuple):
+        segments = segments[0]
+    if isinstance(segments, list) and len(segments) == 1 and isinstance(segments[0], list):
+        segments = segments[0]
+
+    turns: list[SpeakerTurn] = []
+    speaker_map: dict[str, str] = {}
+    for item in segments or []:
+        parsed = parse_sortformer_segment(item)
+        if parsed is None:
+            continue
+        start, end, raw_speaker = parsed
+        speaker_key = str(raw_speaker)
+        speaker = speaker_map.setdefault(speaker_key, f"Speaker {len(speaker_map) + 1}")
+        turns.append(SpeakerTurn(start=start, end=end, speaker=speaker))
+    return turns
+
+
+def parse_sortformer_segment(item: Any) -> tuple[float, float, str] | None:
+    if isinstance(item, str):
+        parts = item.replace(",", " ").split()
+        if len(parts) < 3:
+            return None
+        return float(parts[0]), float(parts[1]), parts[2]
+    if isinstance(item, dict):
+        start = item.get("start") or item.get("begin") or item.get("start_time")
+        end = item.get("end") or item.get("end_time") or item.get("stop")
+        speaker = item.get("speaker") or item.get("speaker_id") or item.get("label")
+        if start is None or end is None or speaker is None:
+            return None
+        return float(start), float(end), str(speaker)
+    if isinstance(item, (list, tuple)) and len(item) >= 3:
+        return float(item[0]), float(item[1]), str(item[2])
+    return None
+
+
 def apply_diarization_to_segments(segments: list[TranscriptSegment], turns: list[SpeakerTurn]) -> list[TranscriptSegment]:
     if not turns:
         return segments
@@ -134,6 +249,11 @@ def prepare_diarization_model(settings: WorkerSettings, *, model_name: str | Non
     cache_dir = Path(settings.diarization_model_cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     ensure_python_int_digit_compat()
+    if selected_model.startswith("nvidia/diar_sortformer"):
+        download_sortformer_snapshot(selected_model, cache_dir)
+        get_sortformer_model_path(cache_dir, selected_model)
+        return cache_dir
+
     try:
         from pyannote.audio import Pipeline
     except ImportError as exc:
@@ -150,6 +270,22 @@ def prepare_diarization_model(settings: WorkerSettings, *, model_name: str | Non
             "Check that the Hugging Face token can access all pyannote model terms."
         )
     return cache_dir
+
+
+def download_sortformer_snapshot(model_name: str, cache_dir: Path) -> None:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError("Preparing NeMo Sortformer models requires huggingface-hub.") from exc
+
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
+    snapshot_kwargs: dict[str, object] = {
+        "cache_dir": str(cache_dir),
+        "allow_patterns": ["*.nemo", "README.md", ".gitattributes"],
+    }
+    if token:
+        snapshot_kwargs["token"] = token
+    snapshot_download(repo_id=model_name, **snapshot_kwargs)
 
 
 def download_required_pyannote_snapshots(model_name: str, cache_dir: Path) -> None:
@@ -184,9 +320,15 @@ def ensure_python_int_digit_compat() -> None:
     import sys
 
     if not hasattr(sys, "get_int_max_str_digits"):
-        setattr(sys, "get_int_max_str_digits", lambda: 4300)
+        def get_int_max_str_digits() -> int:
+            return 4300
+
+        setattr(sys, "get_int_max_str_digits", get_int_max_str_digits)
     if not hasattr(sys, "set_int_max_str_digits"):
-        setattr(sys, "set_int_max_str_digits", lambda maxdigits: None)
+        def set_int_max_str_digits(maxdigits: int) -> None:
+            return None
+
+        setattr(sys, "set_int_max_str_digits", set_int_max_str_digits)
 
 
 def load_pyannote_pipeline(

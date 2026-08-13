@@ -24,6 +24,7 @@ def process_audio_job(session_factory: sessionmaker[Session], engine: Transcript
                 Path(job.input_path),
                 transcription_language=get_job_transcription_language(job),
             )
+            validate_transcript_has_speech(transcript.text)
             result_path = write_result_file(job, transcript.to_dict())
             mark_job_completed(session, job, result_path, _utc_now())
         except Exception as exc:
@@ -37,6 +38,14 @@ def write_result_file(job: Job, transcript: dict[str, object]) -> Path:
     result_path = result_dir / f"{job.id}.json"
     result_path.write_text(json.dumps(transcript), encoding="utf-8")
     return result_path
+
+
+def validate_transcript_has_speech(text: str) -> None:
+    if any(character.isalnum() for character in text):
+        return
+    raise ValueError(
+        "Whisper produced no usable speech text. Check the audio source or retry after audio normalization."
+    )
 
 
 def _utc_now():

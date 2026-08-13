@@ -4,6 +4,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PATH="/opt/venv/bin:${PATH}"
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ENV PYTORCH_JIT=0
 
 WORKDIR /app
 
@@ -20,16 +22,39 @@ RUN find /usr/local /usr/lib -name "libcublas.so.12*" -print -quit | grep -q .
 RUN python3.11 -m venv /opt/venv \
     && pip install --no-cache-dir --upgrade pip setuptools wheel
 
+RUN cat > /opt/venv/lib/python3.11/site-packages/sitecustomize.py <<'PY'
+import sys
+
+# Ubuntu 22.04 ships Python 3.11.0rc1. Newer PyTorch builds expect these
+# CPython APIs to exist; for our usage, no-op compatible shims are enough.
+if not hasattr(sys, "get_int_max_str_digits"):
+    def get_int_max_str_digits():
+        return 4300
+
+    sys.get_int_max_str_digits = get_int_max_str_digits
+
+if not hasattr(sys, "set_int_max_str_digits"):
+    def set_int_max_str_digits(maxdigits: int) -> None:
+        return None
+
+    sys.set_int_max_str_digits = set_int_max_str_digits
+PY
+
 COPY pyproject.toml ./
 COPY src ./src
 
 ARG INSTALL_DIARIZATION=false
+ARG INSTALL_NEMO_DIARIZATION=false
 RUN pip install --no-cache-dir .[faster-whisper] \
     && if [ "$INSTALL_DIARIZATION" = "true" ]; then \
         pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 torch==2.3.1 torchaudio==2.3.1; \
         pip install --no-cache-dir .[diarization]; \
         pip uninstall -y onnxruntime; \
         pip install --no-cache-dir onnxruntime-gpu==1.18.1; \
+    fi \
+    && if [ "$INSTALL_NEMO_DIARIZATION" = "true" ]; then \
+        pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 torch==2.6.0 torchaudio==2.6.0; \
+        pip install --no-cache-dir .[nemo-diarization]; \
     fi
 
 CMD ["python", "-m", "whisper_worker"]

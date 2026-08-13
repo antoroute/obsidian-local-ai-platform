@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from whisper_worker.models import Job
@@ -73,3 +74,14 @@ def mark_job_failed(session: Session, job: Job, error_message: str, now) -> None
     job.updated_at = now
     job.error = error_message
     session.commit()
+
+
+def mark_processing_jobs_failed(session: Session, error_message: str, now) -> int:
+    jobs = list(session.scalars(select(Job).where(Job.status == JOB_STATUS_PROCESSING)))
+    for job in jobs:
+        job.status = JOB_STATUS_FAILED
+        job.updated_at = now
+        job.error = error_message
+    if jobs:
+        session.commit()
+    return len(jobs)

@@ -10,6 +10,7 @@ from whisper_worker.diarization import prepare_diarization_model
 from whisper_worker.engines import check_engine, create_engine, prepare_model
 from whisper_worker.processor import process_audio_job
 from whisper_worker.queue_backend import RedisQueueBackend
+from whisper_worker.repositories import mark_processing_jobs_failed
 
 
 def configure_logging() -> None:
@@ -49,6 +50,15 @@ def run_worker_loop() -> None:
     queue = RedisQueueBackend(settings.redis_url, settings.queue_name)
     logger = logging.getLogger("whisper_worker")
 
+    with session_factory() as session:
+        stale_jobs = mark_processing_jobs_failed(
+            session,
+            "Worker was restarted while transcription was still processing. Retry the audio transcription.",
+            _utc_now(),
+        )
+        if stale_jobs:
+            logger.warning("Marked %s stale processing audio job(s) as failed after worker startup.", stale_jobs)
+
     logger.info("Worker started with engine=%s queue=%s", settings.transcription_engine, settings.queue_name)
 
     while True:
@@ -59,6 +69,12 @@ def run_worker_loop() -> None:
         process_audio_job(session_factory, engine, message.job_id)
 
 
+def _utc_now():
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC)
+
+
 def check_engine_command() -> int:
     settings = get_settings()
     print(f"TRANSCRIPTION_ENGINE={settings.transcription_engine}")
@@ -67,12 +83,13 @@ def check_engine_command() -> int:
     print(f"WHISPER_COMPUTE_TYPE={settings.whisper_compute_type}")
     print(f"WHISPER_MODEL_CACHE_DIR={settings.whisper_model_cache_dir}")
     print(f"DIARIZATION_ENABLED={settings.diarization_enabled}")
-    print(f"DIARIZATION_PROVIDER={settings.diarization_provider}")
-    print(f"DIARIZATION_MODEL={settings.diarization_model}")
-    print(f"DIARIZATION_DEVICE={settings.diarization_device}")
-    print(f"DIARIZATION_MODEL_CACHE_DIR={settings.diarization_model_cache_dir}")
-    print(f"DIARIZATION_TIMEOUT_SECONDS={settings.diarization_timeout_seconds}")
-    print(f"DIARIZATION_MAX_AUDIO_SECONDS={settings.diarization_max_audio_seconds}")
+    if settings.diarization_enabled:
+        print(f"DIARIZATION_PROVIDER={settings.diarization_provider}")
+        print(f"DIARIZATION_MODEL={settings.diarization_model}")
+        print(f"DIARIZATION_DEVICE={settings.diarization_device}")
+        print(f"DIARIZATION_MODEL_CACHE_DIR={settings.diarization_model_cache_dir}")
+        print(f"DIARIZATION_TIMEOUT_SECONDS={settings.diarization_timeout_seconds}")
+        print(f"DIARIZATION_MAX_AUDIO_SECONDS={settings.diarization_max_audio_seconds}")
     try:
         result = check_engine(settings)
     except Exception as exc:

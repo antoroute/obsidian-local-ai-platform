@@ -7,12 +7,15 @@ from types import ModuleType, SimpleNamespace
 
 from whisper_worker.database import Base, create_engine_for_settings, create_session_factory
 from whisper_worker.diarization import (
+    NemoSortformerDiarizationEngine,
     SpeakerTurn,
     apply_diarization_to_segments,
     build_offline_pyannote_pipeline_config,
     download_required_pyannote_snapshots,
+    get_sortformer_model_path,
     load_pyannote_pipeline,
     normalize_pyannote_load_error,
+    parse_sortformer_segments,
     required_pyannote_dependency_models,
 )
 from whisper_worker.engines import (
@@ -28,6 +31,7 @@ from whisper_worker.engines import (
 )
 from whisper_worker.models import Job
 from whisper_worker.processor import process_audio_job
+from whisper_worker.processor import validate_transcript_has_speech
 from whisper_worker.repositories import JOB_STATUS_COMPLETED, JOB_STATUS_FAILED
 from whisper_worker.config import WorkerSettings
 from whisper_worker.repositories import TranscriptSegment
@@ -100,6 +104,19 @@ def test_fake_engine_respects_english_transcription_language(tmp_path) -> None:
     result = engine.transcribe(tmp_path / "input.mp3", transcription_language="en")
 
     assert result.language == "en"
+
+
+def test_transcript_without_speech_is_rejected() -> None:
+    try:
+        validate_transcript_has_speech(". . ...")
+    except ValueError as exc:
+        assert "no usable speech text" in str(exc)
+    else:
+        raise AssertionError("Expected punctuation-only transcript to be rejected")
+
+
+def test_transcript_with_speech_is_accepted() -> None:
+    validate_transcript_has_speech("Bonjour.")
 
 
 def test_transcript_result_serializes_optional_speaker(tmp_path) -> None:
@@ -218,6 +235,58 @@ def test_required_pyannote_dependency_models_are_explicit() -> None:
     assert required_pyannote_dependency_models("pyannote/speaker-diarization-3.1") == [
         "pyannote/segmentation-3.0",
         "pyannote/wespeaker-voxceleb-resnet34-LM",
+    ]
+
+
+def test_parse_sortformer_segments_accepts_common_shapes() -> None:
+    parsed = parse_sortformer_segments([
+        ["0.0", "1.5", "speaker_0"],
+        {"start": 1.5, "end": 2.0, "speaker": "speaker_1"},
+        "2.0 3.0 speaker_0",
+    ])
+
+    assert parsed == [
+        SpeakerTurn(start=0.0, end=1.5, speaker="Speaker 1"),
+        SpeakerTurn(start=1.5, end=2.0, speaker="Speaker 2"),
+        SpeakerTurn(start=2.0, end=3.0, speaker="Speaker 1"),
+    ]
+
+
+def test_parse_sortformer_segments_accepts_single_file_nested_output() -> None:
+    parsed = parse_sortformer_segments([[("0.0", "1.0", "0")]])
+
+    assert parsed == [SpeakerTurn(start=0.0, end=1.0, speaker="Speaker 1")]
+
+
+def test_get_sortformer_model_path_finds_cached_nemo_file(tmp_path) -> None:
+    model_path = tmp_path / "models--nvidia--diar_sortformer_4spk-v1" / "snapshots" / "test" / "diar_sortformer_4spk-v1.nemo"
+    model_path.parent.mkdir(parents=True)
+    model_path.write_text("model", encoding="utf-8")
+
+    assert get_sortformer_model_path(tmp_path, "nvidia/diar_sortformer_4spk-v1") == model_path
+
+
+def test_nemo_sortformer_engine_converts_model_output(tmp_path, monkeypatch) -> None:
+    input_path = tmp_path / "input.webm"
+    input_path.write_bytes(b"audio")
+
+    class FakeModel:
+        def diarize(self, audio: str, batch_size: int):
+            assert Path(audio).suffix == ".wav"
+            assert batch_size == 1
+            return [["0.0 1.0 speaker_0", "1.0 2.0 speaker_1"]]
+
+    def fake_convert_audio_for_sortformer(source: Path, target: Path) -> None:
+        assert source == input_path
+        target.write_bytes(b"wav")
+
+    monkeypatch.setattr("whisper_worker.diarization.convert_audio_for_sortformer", fake_convert_audio_for_sortformer)
+
+    turns = NemoSortformerDiarizationEngine(FakeModel()).diarize(input_path)
+
+    assert turns == [
+        SpeakerTurn(start=0.0, end=1.0, speaker="Speaker 1"),
+        SpeakerTurn(start=1.0, end=2.0, speaker="Speaker 2"),
     ]
 
 
@@ -402,9 +471,18 @@ def test_faster_whisper_engine_converts_segments(monkeypatch, tmp_path) -> None:
             self.device = device
             self.compute_type = compute_type
 
-        def transcribe(self, input_path: str, language: str | None, beam_size: int):
+        def transcribe(
+            self,
+            input_path: str,
+            language: str | None,
+            beam_size: int,
+            vad_filter: bool,
+            condition_on_previous_text: bool,
+        ):
             del input_path
             self.language = language
+            self.vad_filter = vad_filter
+            self.condition_on_previous_text = condition_on_previous_text
             segments = [
                 SimpleNamespace(start=0.0, end=1.0, text=" Bonjour"),
                 SimpleNamespace(start=1.0, end=2.5, text=" le monde "),
@@ -444,6 +522,8 @@ def test_faster_whisper_engine_converts_segments(monkeypatch, tmp_path) -> None:
     assert result.duration == 2.5
     assert result.segments[0].start == 0.0
     assert result.segments[1].text == "le monde"
+    assert engine._model.vad_filter is True
+    assert engine._model.condition_on_previous_text is False
 
 
 def test_faster_whisper_engine_uses_requested_french_language(tmp_path) -> None:
@@ -451,8 +531,8 @@ def test_faster_whisper_engine_uses_requested_french_language(tmp_path) -> None:
         def __init__(self) -> None:
             self.language: str | None = "unset"
 
-        def transcribe(self, input_path: str, language: str | None, beam_size: int):
-            del input_path, beam_size
+        def transcribe(self, input_path: str, language: str | None, beam_size: int, **kwargs):
+            del input_path, beam_size, kwargs
             self.language = language
             return [SimpleNamespace(start=0.0, end=1.0, text="Bonjour")], SimpleNamespace(language=language, duration=1.0)
 
@@ -470,8 +550,8 @@ def test_faster_whisper_engine_uses_requested_english_language(tmp_path) -> None
         def __init__(self) -> None:
             self.language: str | None = "unset"
 
-        def transcribe(self, input_path: str, language: str | None, beam_size: int):
-            del input_path, beam_size
+        def transcribe(self, input_path: str, language: str | None, beam_size: int, **kwargs):
+            del input_path, beam_size, kwargs
             self.language = language
             return [SimpleNamespace(start=0.0, end=1.0, text="Hello")], SimpleNamespace(language=language, duration=1.0)
 
@@ -489,8 +569,8 @@ def test_faster_whisper_engine_does_not_force_language_in_auto_mode(tmp_path) ->
         def __init__(self) -> None:
             self.language: str | None = "unset"
 
-        def transcribe(self, input_path: str, language: str | None, beam_size: int):
-            del input_path, beam_size
+        def transcribe(self, input_path: str, language: str | None, beam_size: int, **kwargs):
+            del input_path, beam_size, kwargs
             self.language = language
             return [SimpleNamespace(start=0.0, end=1.0, text="Bonjour")], SimpleNamespace(language="fr", duration=1.0)
 

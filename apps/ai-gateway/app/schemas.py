@@ -69,12 +69,24 @@ class MeetingUsageResponse(BaseModel):
     participants_count: int
 
 
+class MeetingGenerationAnalysisResponse(BaseModel):
+    mode: MeetingGenerationMode
+    sections_count: int | None = None
+    section_titles: list[str] = Field(default_factory=list)
+    transcript_chars: int
+    manual_notes_chars: int
+    template_chars: int
+    output_language: OutputLanguage
+    diarization_status: Literal["disabled", "completed", "failed"] | None = None
+
+
 class MeetingGenerateResponse(BaseModel):
     model: str
     title: str
     meeting_markdown: str
     generation_mode: MeetingGenerationMode = "standard"
     generation_stages: int | None = None
+    generation_analysis: MeetingGenerationAnalysisResponse | None = None
     usage: MeetingUsageResponse
 
 
@@ -85,6 +97,7 @@ class MeetingGenerateFromJobResponse(BaseModel):
     meeting_markdown: str
     generation_mode: MeetingGenerationMode = "standard"
     generation_stages: int | None = None
+    generation_analysis: MeetingGenerationAnalysisResponse | None = None
     usage: MeetingUsageResponse
 
 

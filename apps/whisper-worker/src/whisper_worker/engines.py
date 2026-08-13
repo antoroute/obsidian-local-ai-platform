@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import logging
 import multiprocessing
 from pathlib import Path
 import queue
+import subprocess
+import tempfile
 import time
 from typing import Any
 
@@ -210,11 +213,14 @@ class FasterWhisperEngine(TranscriptionEngine):
             raise FileNotFoundError("Audio input file is missing.")
 
         language = _resolve_faster_whisper_language(transcription_language, self._default_language)
-        segments_iterable, info = self._model.transcribe(
-            str(input_path),
-            language=language,
-            beam_size=self._beam_size,
-        )
+        with normalize_audio_for_whisper(input_path) as whisper_input_path:
+            segments_iterable, info = self._model.transcribe(
+                str(whisper_input_path),
+                language=language,
+                beam_size=self._beam_size,
+                vad_filter=True,
+                condition_on_previous_text=False,
+            )
         segments = list(segments_iterable)
         text = " ".join(segment.text.strip() for segment in segments if getattr(segment, "text", "").strip()).strip()
         result_language = getattr(info, "language", None) or language or "unknown"
@@ -233,6 +239,38 @@ class FasterWhisperEngine(TranscriptionEngine):
                 for segment in segments
             ],
         )
+
+
+@contextmanager
+def normalize_audio_for_whisper(input_path: Path):
+    """Decode browser/container audio into a stable mono WAV for faster-whisper."""
+    with tempfile.TemporaryDirectory(prefix="whisper-audio-") as temp_dir:
+        wav_path = Path(temp_dir) / "input.wav"
+        command = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-i",
+            str(input_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            str(wav_path),
+        ]
+        try:
+            subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if wav_path.exists() and wav_path.stat().st_size > 0:
+                logger.info("Normalized audio for Whisper: %s -> mono 16 kHz WAV", input_path.name)
+                yield wav_path
+                return
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            logger.warning("Audio normalization failed; using original file for Whisper: %s", exc)
+
+        yield input_path
 
 
 def _resolve_fake_language(transcription_language: str | None) -> str:

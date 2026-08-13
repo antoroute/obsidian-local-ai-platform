@@ -46,6 +46,7 @@ from app.schemas import (
     MeetingGenerateFromJobResponse,
     MeetingGenerateRequest,
     MeetingGenerateResponse,
+    MeetingGenerationAnalysisResponse,
     MeetingUsageResponse,
     ModelsResponse,
     NoteSummarizeRequest,
@@ -218,7 +219,12 @@ async def assistant_chat(
     )
 
 
-async def run_meeting_generation(prepared_request: PreparedMeetingRequest, llm_client: LlmClient) -> tuple[str, str, int | None]:
+async def run_meeting_generation(
+    prepared_request: PreparedMeetingRequest,
+    llm_client: LlmClient,
+    *,
+    diarization_status: str | None = None,
+) -> tuple[str, str, int | None, MeetingGenerationAnalysisResponse | None]:
     if prepared_request.generation_mode == "deep_think":
         sections = build_deep_think_sections(prepared_request, get_settings())
         rendered_sections: list[DeepThinkRenderedSection] = []
@@ -246,6 +252,12 @@ async def run_meeting_generation(prepared_request: PreparedMeetingRequest, llm_c
                 final_cleanup=get_settings().meeting_deep_think_final_cleanup,
             ),
             len(rendered_sections),
+            build_meeting_generation_analysis(
+                prepared_request,
+                sections_count=len(rendered_sections),
+                section_titles=[section.title for section in sections],
+                diarization_status=diarization_status,
+            ),
         )
 
     user_prompt = prepared_request.user_prompt
@@ -269,7 +281,27 @@ async def run_meeting_generation(prepared_request: PreparedMeetingRequest, llm_c
         system_prompt=prepared_request.system_prompt,
         user_prompt=user_prompt,
     )
-    return result.model, result.content, None
+    return result.model, result.content, None, None
+
+
+def build_meeting_generation_analysis(
+    prepared_request: PreparedMeetingRequest,
+    *,
+    sections_count: int | None,
+    section_titles: list[str],
+    diarization_status: str | None,
+) -> MeetingGenerationAnalysisResponse:
+    safe_diarization_status = diarization_status if diarization_status in {"disabled", "completed", "failed"} else None
+    return MeetingGenerationAnalysisResponse(
+        mode=prepared_request.generation_mode,
+        sections_count=sections_count,
+        section_titles=section_titles,
+        transcript_chars=prepared_request.transcript_chars,
+        manual_notes_chars=prepared_request.manual_notes_chars,
+        template_chars=prepared_request.template_chars,
+        output_language=resolve_prepared_output_language(prepared_request),
+        diarization_status=safe_diarization_status,
+    )
 
 
 def resolve_prepared_output_language(prepared_request: PreparedMeetingRequest) -> str:
@@ -290,7 +322,7 @@ async def generate_meeting_report(
     prepared_request = prepare_meeting_request(payload, get_settings())
 
     try:
-        result_model, result_content, generation_stages = await run_meeting_generation(prepared_request, llm_client)
+        result_model, result_content, generation_stages, generation_analysis = await run_meeting_generation(prepared_request, llm_client)
     except OllamaUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -308,6 +340,7 @@ async def generate_meeting_report(
         meeting_markdown=result_content,
         generation_mode=prepared_request.generation_mode,
         generation_stages=generation_stages,
+        generation_analysis=generation_analysis,
         usage=MeetingUsageResponse(
             transcript_chars=prepared_request.transcript_chars,
             manual_notes_chars=prepared_request.manual_notes_chars,
@@ -341,7 +374,11 @@ async def generate_meeting_report_from_job(
     prepared_request = prepare_meeting_from_job_request(payload, transcript=transcript_text, settings=get_settings())
 
     try:
-        result_model, result_content, generation_stages = await run_meeting_generation(prepared_request, llm_client)
+        result_model, result_content, generation_stages, generation_analysis = await run_meeting_generation(
+            prepared_request,
+            llm_client,
+            diarization_status=transcript_payload.get("diarization_status") if isinstance(transcript_payload.get("diarization_status"), str) else None,
+        )
     except OllamaUnavailableError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -360,6 +397,7 @@ async def generate_meeting_report_from_job(
         meeting_markdown=result_content,
         generation_mode=prepared_request.generation_mode,
         generation_stages=generation_stages,
+        generation_analysis=generation_analysis,
         usage=MeetingUsageResponse(
             transcript_chars=prepared_request.transcript_chars,
             manual_notes_chars=prepared_request.manual_notes_chars,

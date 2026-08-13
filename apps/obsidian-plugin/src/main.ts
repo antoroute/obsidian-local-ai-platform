@@ -29,6 +29,7 @@ const AUDIO_POLL_TIMEOUT_MS = 30 * 60 * 1_000;
 const DEFAULT_RECORDING_EXTENSION = ".webm";
 const DEFAULT_RECORDING_MIME_TYPE = "audio/webm";
 const SUPPORTED_AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".webm", ".ogg"]);
+const PLUGIN_BUILD_ID = "0.1.1-transcript-parser";
 type TemplateInstallSet = "minimal" | "fr" | "en" | "all";
 type TemplateGroup = "meeting_note" | "meeting_summary" | "actions" | "technical" | "client" | "other";
 type AssistantResponseMode = "simple" | "current_note" | "vault";
@@ -357,7 +358,7 @@ interface TranscriptSegmentPayload {
   start: number;
   end: number;
   text: string;
-  speaker?: string;
+  speaker?: string | null;
 }
 
 interface JobResultResponsePayload {
@@ -390,6 +391,16 @@ interface MeetingGenerateFromJobResponsePayload {
   meeting_markdown: string;
   generation_mode?: MeetingGenerationMode;
   generation_stages?: number | null;
+  generation_analysis?: {
+    mode: MeetingGenerationMode;
+    sections_count?: number | null;
+    section_titles: string[];
+    transcript_chars: number;
+    manual_notes_chars: number;
+    template_chars: number;
+    output_language: PluginSettings["outputLanguage"];
+    diarization_status?: "disabled" | "completed" | "failed" | null;
+  } | null;
   usage: {
     transcript_chars: number;
     manual_notes_chars: number;
@@ -659,6 +670,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    console.info("Note Compagnon loaded", { build: PLUGIN_BUILD_ID });
 
     this.registerView(DASHBOARD_VIEW_TYPE, (leaf) => new NoteCompagnonDashboardView(leaf, this));
     this.addSettingTab(new LocalAiPlatformSettingTab(this.app, this));
@@ -702,6 +714,13 @@ export default class LocalAiPlatformPlugin extends Plugin {
       name: "Note Compagnon: Generate minutes from audio file",
       callback: async () => {
         await this.generateMeetingMinutesFromAudioFile();
+      },
+    });
+    this.addCommand({
+      id: "debug-transcription-result",
+      name: "Note Compagnon: Debug transcription result",
+      callback: async () => {
+        await this.debugTranscriptionResult();
       },
     });
     this.addCommand({
@@ -870,19 +889,22 @@ export default class LocalAiPlatformPlugin extends Plugin {
       const templateChoice = await this.chooseTemplate();
       const generationMode = await chooseMeetingGenerationMode(this.app);
 
-      new Notice(`Uploading audio: ${audioFile.name}`);
-      const queuedJob = await this.uploadAudio(apiBaseUrl, apiToken, audioFile);
+      const savedAudio = await this.resolveAudioFileForVault(audioFile);
+      new Notice(savedAudio.reused ? `Audio deja dans le vault: ${savedAudio.file.path}` : `Audio saved: ${savedAudio.file.path}`);
+
+      new Notice(`Uploading audio: ${savedAudio.file.name}`);
+      const uploadFile = createFileFromBlob(savedAudio.blob, savedAudio.file.name, audioFile.type || guessAudioMimeType(savedAudio.file.name));
+      const queuedJob = await this.uploadAudio(apiBaseUrl, apiToken, uploadFile);
       new Notice("Audio uploaded.");
       const completedJob = await this.pollAudioJob(apiBaseUrl, apiToken, queuedJob.job_id);
       if (completedJob.status !== "completed") {
         throw new UserFacingError("The audio job did not complete successfully.");
       }
       const transcriptResult = await this.requestJobResult(apiBaseUrl, apiToken, queuedJob.job_id);
-      const transcriptFile = await this.saveExternalAudioTranscriptToVault(
-        transcriptResult,
-        audioFile.name,
-        metadata.sourceNoteFile,
-      );
+      this.ensureUsableTranscriptResult(transcriptResult);
+      this.reportTranscriptRetrieved(transcriptResult);
+      const transcriptFile = await this.saveTranscriptToVaultWithFallback(transcriptResult, savedAudio.file, metadata.sourceNoteFile);
+      new Notice(`Transcription saved: ${transcriptFile.path}`);
 
       new Notice(formatMeetingGenerationNotice(generationMode));
       const result = await this.requestMeetingFromJob(apiBaseUrl, apiToken, {
@@ -899,13 +921,32 @@ export default class LocalAiPlatformPlugin extends Plugin {
       const outputFile = await this.writeMeetingNote({
         response: result,
         templateChoice,
-        sourceAudioName: audioFile.name,
+        sourceAudioName: savedAudio.file.name,
         sourceNoteFile: metadata.sourceNoteFile,
+        sourceAudioFile: savedAudio.file,
         transcriptFile,
         transcriptResult,
         generationMode,
+        outputLanguage: metadata.outputLanguage,
       });
       new Notice(`Minutes created: ${outputFile.path}`);
+    } catch (error) {
+      this.showUserFacingError(error);
+    }
+  }
+
+  async debugTranscriptionResult(): Promise<void> {
+    try {
+      this.validateCoreSettings();
+      const jobId = window.prompt("Job ID de transcription a tester");
+      if (!jobId?.trim()) {
+        return;
+      }
+
+      const result = await this.requestJobResult(this.getApiBaseUrl(), this.getApiToken(), jobId.trim());
+      this.ensureUsableTranscriptResult(result);
+      this.reportTranscriptRetrieved(result);
+      new Notice(`Diagnostic transcription OK (${PLUGIN_BUILD_ID}).`);
     } catch (error) {
       this.showUserFacingError(error);
     }
@@ -1006,7 +1047,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
       new Notice("Audio uploaded.");
       await this.pollAudioJob(apiBaseUrl, apiToken, queuedJob.job_id);
       const transcriptResult = await this.requestJobResult(apiBaseUrl, apiToken, queuedJob.job_id);
-      const transcriptFile = await this.saveTranscriptToVault(transcriptResult, savedAudio.file, sourceNote);
+      this.ensureUsableTranscriptResult(transcriptResult);
+      this.reportTranscriptRetrieved(transcriptResult);
+      const transcriptFile = await this.saveTranscriptToVaultWithFallback(transcriptResult, savedAudio.file, sourceNote);
       await this.completeMeetingSourceNote(recording, savedAudio.file, transcriptFile);
 
       new Notice(formatMeetingGenerationNotice(generationMode));
@@ -2431,6 +2474,83 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return { file: savedFile, blob: recording.blob };
   }
 
+  async resolveAudioFileForVault(audioFile: File): Promise<{ file: TFile; blob: Blob; reused: boolean }> {
+    const existingVaultFile = this.findSelectedAudioInVault(audioFile);
+    if (existingVaultFile) {
+      const arrayBuffer = await this.app.vault.readBinary(existingVaultFile);
+      return { file: existingVaultFile, blob: new Blob([arrayBuffer], { type: audioFile.type || guessAudioMimeType(existingVaultFile.name) }), reused: true };
+    }
+
+    const saved = await this.saveExternalAudioToVault(audioFile);
+    return { ...saved, reused: false };
+  }
+
+  findSelectedAudioInVault(audioFile: File): TFile | null {
+    const selectedPath = getPickedFileLocalPath(audioFile);
+    const adapter = this.app.vault.adapter as { getFullPath?: (path: string) => string };
+    const files = this.app.vault.getFiles();
+
+    if (selectedPath && typeof adapter.getFullPath === "function") {
+      const normalizedSelectedPath = normalizeLocalFilePath(selectedPath);
+      for (const file of files) {
+        if (!SUPPORTED_AUDIO_EXTENSIONS.has(getFileExtension(file.name))) {
+          continue;
+        }
+        const fullPath = adapter.getFullPath(file.path);
+        if (normalizeLocalFilePath(fullPath) === normalizedSelectedPath) {
+          return file;
+        }
+      }
+    }
+
+    const sameNameAndSize = files.filter(
+      (file) =>
+        SUPPORTED_AUDIO_EXTENSIONS.has(getFileExtension(file.name)) &&
+        file.name === audioFile.name &&
+        file.stat.size === audioFile.size,
+    );
+    if (sameNameAndSize.length === 1) {
+      return sameNameAndSize[0];
+    }
+
+    const sameName = files.filter(
+      (file) => SUPPORTED_AUDIO_EXTENSIONS.has(getFileExtension(file.name)) && file.name === audioFile.name,
+    );
+    if (sameName.length === 1) {
+      const candidate = sameName[0];
+      const sizeDelta = Math.abs(candidate.stat.size - audioFile.size);
+      const toleratedDelta = Math.max(1024, Math.floor(audioFile.size * 0.01));
+      if (sizeDelta <= toleratedDelta) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  async saveExternalAudioToVault(audioFile: File): Promise<{ file: TFile; blob: Blob }> {
+    const recordingsFolder = this.getRecordingsFolder();
+    await ensureFolderExists(this.app, recordingsFolder);
+
+    const safeBaseName = sanitizeFileName(stripFileExtension(audioFile.name)) || "audio";
+    const extension = getFileExtension(audioFile.name) || ".webm";
+    const filePath = getAvailableVaultPath(this.app, normalizePath(`${recordingsFolder}/${safeBaseName}${extension}`));
+    const arrayBuffer = await audioFile.arrayBuffer();
+
+    try {
+      await this.app.vault.createBinary(filePath, arrayBuffer);
+    } catch {
+      throw new UserFacingError("Failed to save the selected audio in the vault.");
+    }
+
+    const savedFile = this.app.vault.getAbstractFileByPath(filePath);
+    if (!(savedFile instanceof TFile)) {
+      throw new UserFacingError("The selected audio could not be found in the vault after saving.");
+    }
+
+    return { file: savedFile, blob: audioFile };
+  }
+
   async saveTranscriptToVault(
     result: JobResultResponsePayload,
     audioFile: TFile,
@@ -2456,6 +2576,76 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return createOrReplaceFile(this.app, transcriptPath, content);
   }
 
+  async saveTranscriptToVaultWithFallback(
+    result: JobResultResponsePayload,
+    audioFile: TFile,
+    sourceNoteFile?: TFile,
+  ): Promise<TFile> {
+    try {
+      return await this.saveTranscriptToVault(result, audioFile, sourceNoteFile);
+    } catch (primaryError) {
+      console.warn("Note Compagnon transcript save failed", {
+        audioPath: audioFile.path,
+        sourceNotePath: sourceNoteFile?.path,
+        error: primaryError instanceof Error ? primaryError.message : String(primaryError),
+      });
+    }
+
+    try {
+      const recordingsFolder = this.getRecordingsFolder();
+      await ensureFolderExists(this.app, recordingsFolder);
+      const transcriptPath = getAvailableVaultPath(this.app, normalizePath(`${recordingsFolder}/${audioFile.basename} - transcript.md`));
+      const audioLink = sourceNoteFile
+        ? this.app.metadataCache.fileToLinktext(audioFile, sourceNoteFile.path, true)
+        : this.app.metadataCache.fileToLinktext(audioFile, "", true);
+      const content = buildTranscriptNote({
+        audioLink,
+        jobId: result.job_id,
+        language: result.transcript.language,
+        duration: result.transcript.duration,
+        diarizationEnabled: result.transcript.diarization_enabled ?? false,
+        diarizationStatus: result.transcript.diarization_status ?? "disabled",
+        segments: result.transcript.segments,
+        text: result.transcript.text,
+        generatedAt: new Date(),
+      });
+      const fallbackFile = await createOrReplaceFile(this.app, transcriptPath, content);
+      new Notice(`Transcription saved in fallback folder: ${fallbackFile.path}`);
+      return fallbackFile;
+    } catch (fallbackError) {
+      console.warn("Note Compagnon transcript fallback save failed", {
+        audioPath: audioFile.path,
+        fallbackFolder: this.getRecordingsFolder(),
+        error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+      });
+      throw new UserFacingError("The transcription was retrieved but could not be saved in the vault.");
+    }
+  }
+
+  ensureUsableTranscriptResult(result: JobResultResponsePayload): void {
+    if (hasUsableSpeechText(result.transcript.text)) {
+      return;
+    }
+    throw new UserFacingError(
+      "The transcription contains no usable speech text. Retry the transcription with the updated STT pipeline.",
+    );
+  }
+
+  reportTranscriptRetrieved(result: JobResultResponsePayload): void {
+    const textChars = result.transcript.text.length;
+    const segmentCount = result.transcript.segments.length;
+    const language = result.transcript.language || "unknown";
+    console.info("Note Compagnon transcription result retrieved", {
+      job_id: result.job_id,
+      language,
+      duration: result.transcript.duration,
+      text_chars: textChars,
+      segments: segmentCount,
+      diarization_status: result.transcript.diarization_status ?? "disabled",
+    });
+    new Notice(`Transcription retrieved: ${textChars} chars, ${segmentCount} segments, language ${language}.`);
+  }
+
   async saveExternalAudioTranscriptToVault(
     result: JobResultResponsePayload,
     audioFileName: string,
@@ -2477,6 +2667,42 @@ export default class LocalAiPlatformPlugin extends Plugin {
       generatedAt: new Date(),
     });
     return createOrReplaceFile(this.app, transcriptPath, content);
+  }
+
+  async trySaveExternalAudioTranscriptToVault(
+    result: JobResultResponsePayload,
+    audioFileName: string,
+    sourceNoteFile?: TFile,
+  ): Promise<TFile | undefined> {
+    try {
+      const transcriptFile = await this.saveExternalAudioTranscriptToVault(result, audioFileName, sourceNoteFile);
+      new Notice(`Transcription saved: ${transcriptFile.path}`);
+      return transcriptFile;
+    } catch (primaryError) {
+      console.warn("Note Compagnon transcript save failed", {
+        audioFileName,
+        sourceNotePath: sourceNoteFile?.path,
+        fallbackFolder: this.getRecordingsFolder(),
+        error: primaryError instanceof Error ? primaryError.message : String(primaryError),
+      });
+
+      if (sourceNoteFile) {
+        try {
+          const transcriptFile = await this.saveExternalAudioTranscriptToVault(result, audioFileName);
+          new Notice(`Transcription saved in ${this.getRecordingsFolder()}: ${transcriptFile.path}`);
+          return transcriptFile;
+        } catch (fallbackError) {
+          console.warn("Note Compagnon transcript fallback save failed", {
+            audioFileName,
+            fallbackFolder: this.getRecordingsFolder(),
+            error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+          });
+        }
+      }
+
+      new Notice("Transcription retrieved but could not be saved in the vault. Minutes generation will continue.");
+      return undefined;
+    }
   }
 
   async completeMeetingSourceNote(recording: RecordingStopResult, audioFile: TFile, transcriptFile?: TFile): Promise<TFile> {
@@ -2527,6 +2753,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
     transcriptFile?: TFile;
     transcriptResult?: JobResultResponsePayload;
     generationMode?: MeetingGenerationMode;
+    outputLanguage?: PluginSettings["outputLanguage"];
     recordingSourceUsed?: string;
     generatedAt?: Date;
   }): Promise<TFile> {
@@ -2550,7 +2777,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       generatedAt,
       model: input.response.model,
       templateLabel: input.templateChoice.label,
-      outputLanguage: this.getOutputLanguage(),
+      outputLanguage: input.outputLanguage ?? this.getOutputLanguage(),
       transcriptionLanguage: this.getTranscriptionLanguage(),
       jobId: input.response.job_id,
       audioFileName: input.sourceAudioName,
@@ -2559,6 +2786,8 @@ export default class LocalAiPlatformPlugin extends Plugin {
       transcriptLink,
       transcriptLanguage: input.transcriptResult?.transcript.language,
       generationMode: input.generationMode ?? input.response.generation_mode ?? "standard",
+      generationStages: input.response.generation_stages ?? null,
+      generationAnalysis: input.response.generation_analysis ?? null,
       recordingSourceUsed: input.recordingSourceUsed ?? "external_audio_file",
       meetingMarkdown: cleanGeneratedMarkdown(input.response.meeting_markdown),
     });
@@ -2634,10 +2863,12 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
   parseJobResultResponse(responseText: string): JobResultResponsePayload {
     const parsed = this.parseJson(responseText, "The AI Gateway returned an invalid transcription result.");
-    if (!isJobResultResponsePayload(parsed)) {
+    const normalized = normalizeJobResultResponsePayload(parsed);
+    if (!normalized) {
+      console.warn("Note Compagnon invalid transcription payload", describeTranscriptionPayloadShape(parsed));
       throw new UserFacingError("The AI Gateway returned an invalid transcription result.");
     }
-    return parsed;
+    return normalized;
   }
 
   parseMeetingGenerateFromJobResponse(responseText: string): MeetingGenerateFromJobResponsePayload {
@@ -3859,24 +4090,27 @@ class MeetingGenerationModeModal extends Modal {
     contentEl.empty();
     contentEl.createEl("h2", { text: "Qualite du compte rendu" });
     contentEl.createEl("p", {
-      text: "Choisis le mode de generation. Deep think est plus lent, mais recommande pour les reunions longues ou importantes.",
+      text: "Choisis explicitement comment Note Compagnon doit rediger le CR. Standard est rapide ; Deep think est plus lent mais preserve mieux les informations des reunions longues.",
+    });
+    contentEl.createEl("p", {
+      text: "Aucun mode n'est lance tant que tu n'as pas clique sur l'un des deux boutons.",
     });
 
     new Setting(contentEl)
-      .setName("Standard")
-      .setDesc("Generation actuelle, plus rapide. Adaptee aux reunions courtes ou peu denses.")
+      .setName("Compte rendu rapide")
+      .setDesc("Mode Standard. Recommande pour les reunions courtes ou simples. Un seul passage principal, plus rapide.")
       .addButton((button) =>
-        button.setButtonText("Standard").setCta().onClick(() => {
+        button.setButtonText("Choisir Standard").onClick(() => {
           this.onChoose("standard");
           this.close();
         }),
       );
 
     new Setting(contentEl)
-      .setName("Deep think")
-      .setDesc("Generation detaillee par sections pour preserver plus d'informations. Peut prendre plusieurs minutes.")
+      .setName("Compte rendu detaille")
+      .setDesc("Mode Deep think. Recommande pour les reunions longues ou importantes : analyse par sections, plus lent mais plus complet.")
       .addButton((button) =>
-        button.setButtonText("Deep think").onClick(() => {
+        button.setButtonText("Choisir Deep think").setCta().onClick(() => {
           this.onChoose("deep_think");
           this.close();
         }),
@@ -3989,9 +4223,120 @@ function isJobResultResponsePayload(value: unknown): value is JobResultResponseP
       typeof (segment as Partial<TranscriptSegmentPayload>).end === "number" &&
       typeof (segment as Partial<TranscriptSegmentPayload>).text === "string" &&
       ((segment as Partial<TranscriptSegmentPayload>).speaker === undefined ||
+        (segment as Partial<TranscriptSegmentPayload>).speaker === null ||
         typeof (segment as Partial<TranscriptSegmentPayload>).speaker === "string"),
     )
   );
+}
+
+function normalizeJobResultResponsePayload(value: unknown): JobResultResponsePayload | null {
+  if (isJobResultResponsePayload(value)) {
+    return value;
+  }
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const jobId = typeof candidate.job_id === "string" ? candidate.job_id : "";
+  const transcriptSource = isRecord(candidate.transcript) ? candidate.transcript : candidate;
+  const normalizedTranscript = normalizeTranscriptPayload(transcriptSource);
+  if (!normalizedTranscript) {
+    return null;
+  }
+
+  return {
+    job_id: jobId,
+    transcript: normalizedTranscript,
+  };
+}
+
+function normalizeTranscriptPayload(value: Record<string, unknown>): JobResultResponsePayload["transcript"] | null {
+  const text = typeof value.text === "string" ? value.text : "";
+  const language = typeof value.language === "string" && value.language.trim() ? value.language : "unknown";
+  const duration = normalizeNumber(value.duration) ?? 0;
+  const rawSegments = Array.isArray(value.segments) ? value.segments : [];
+  const segments = rawSegments
+    .map(normalizeTranscriptSegmentPayload)
+    .filter((segment): segment is TranscriptSegmentPayload => segment !== null);
+
+  if (!text && segments.length === 0) {
+    return null;
+  }
+  if (segments.length === 0 && text) {
+    segments.push({
+      start: 0,
+      end: duration,
+      text,
+    });
+  }
+
+  const diarizationStatus = value.diarization_status;
+  return {
+    text: text || segments.map((segment) => segment.text).join(" ").trim(),
+    language,
+    duration,
+    diarization_enabled: value.diarization_enabled === true,
+    diarization_status:
+      diarizationStatus === "completed" || diarizationStatus === "failed" || diarizationStatus === "disabled"
+        ? diarizationStatus
+        : "disabled",
+    segments,
+  };
+}
+
+function normalizeTranscriptSegmentPayload(value: unknown): TranscriptSegmentPayload | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const start = normalizeNumber(value.start);
+  const end = normalizeNumber(value.end);
+  const text = typeof value.text === "string" ? value.text : "";
+  if (start === null || end === null || !text) {
+    return null;
+  }
+  const speaker = value.speaker;
+  return {
+    start,
+    end,
+    text,
+    ...(typeof speaker === "string" && speaker.trim() ? { speaker } : {}),
+  };
+}
+
+function normalizeNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function describeTranscriptionPayloadShape(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    return { type: typeof value };
+  }
+  const transcript = isRecord(value.transcript) ? value.transcript : value;
+  const segments = Array.isArray(transcript.segments) ? transcript.segments : [];
+  const firstSegment = segments[0];
+  return {
+    top_level_keys: Object.keys(value),
+    transcript_keys: Object.keys(transcript),
+    job_id_type: typeof value.job_id,
+    text_type: typeof transcript.text,
+    language_type: typeof transcript.language,
+    duration_type: typeof transcript.duration,
+    segments_is_array: Array.isArray(transcript.segments),
+    segments_count: segments.length,
+    first_segment_keys: isRecord(firstSegment) ? Object.keys(firstSegment) : [],
+  };
 }
 
 function isMeetingGenerateFromJobResponsePayload(value: unknown): value is MeetingGenerateFromJobResponsePayload {
@@ -4864,6 +5209,8 @@ function buildMeetingNote(input: {
   transcriptLink: string | null;
   transcriptLanguage?: string;
   generationMode: MeetingGenerationMode;
+  generationStages: number | null;
+  generationAnalysis: MeetingGenerateFromJobResponsePayload["generation_analysis"];
   recordingSourceUsed: string;
   meetingMarkdown: string;
 }): string {
@@ -4882,6 +5229,9 @@ template: ${yamlQuote(input.templateLabel)}
 transcription_language: ${yamlQuote(input.transcriptLanguage || input.transcriptionLanguage)}
 output_language: ${yamlQuote(input.outputLanguage)}
 generation_mode: ${yamlQuote(input.generationMode)}
+generation_stages: ${input.generationStages ?? ""}
+generation_analysis_sections: ${input.generationAnalysis?.sections_count ?? ""}
+generation_analysis_diarization_status: ${yamlQuote(input.generationAnalysis?.diarization_status ?? "")}
 recording_source_used: ${yamlQuote(input.recordingSourceUsed)}
 job_id: ${yamlQuote(input.jobId)}
 created: ${formatDate(input.generatedAt)}
@@ -4934,6 +5284,7 @@ function chooseTemplateWithModal(app: App, choices: TemplateChoice[], languageFi
 function chooseMeetingGenerationMode(app: App): Promise<MeetingGenerationMode> {
   return new Promise((resolve, reject) => {
     let resolved = false;
+    new Notice("Choisis la qualite du compte rendu : Standard ou Deep think.", 7000);
     const modal = new MeetingGenerationModeModal(app, (mode) => {
       resolved = true;
       resolve(mode);
@@ -5053,9 +5404,27 @@ function getFileExtension(fileName: string): string {
   return dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : "";
 }
 
+function getPickedFileLocalPath(file: File): string {
+  const maybePath = (file as File & { path?: unknown }).path;
+  return typeof maybePath === "string" ? maybePath : "";
+}
+
+function normalizeLocalFilePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
+}
+
 function stripFileExtension(fileName: string): string {
   const dotIndex = fileName.lastIndexOf(".");
   return dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName;
+}
+
+function hasUsableSpeechText(text: string): boolean {
+  for (const character of text) {
+    if (/[A-Za-z0-9À-ÖØ-öø-ÿ]/.test(character)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function sleep(durationMs: number): Promise<void> {
@@ -5224,6 +5593,16 @@ function cleanupRecordingResources(stream: MediaStream, extraStreams: MediaStrea
 
 function createFileFromBlob(blob: Blob, name: string, mimeType: string): File {
   return new File([blob], name, { type: mimeType });
+}
+
+function guessAudioMimeType(fileName: string): string {
+  const extension = getFileExtension(fileName);
+  if (extension === ".wav") return "audio/wav";
+  if (extension === ".mp3") return "audio/mpeg";
+  if (extension === ".m4a") return "audio/mp4";
+  if (extension === ".ogg") return "audio/ogg";
+  if (extension === ".webm") return "audio/webm";
+  return "application/octet-stream";
 }
 
 function previewAssistantReplacement(

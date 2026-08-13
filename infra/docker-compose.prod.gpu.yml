@@ -23,6 +23,9 @@ services:
     build:
       context: ./apps/whisper-worker
       dockerfile: Dockerfile.gpu
+      args:
+        INSTALL_NEMO_DIARIZATION: "false"
+        INSTALL_DIARIZATION: "false"
     environment:
       TRANSCRIPTION_ENGINE: faster_whisper
       WHISPER_MODEL_SIZE: medium
@@ -32,9 +35,7 @@ services:
       WHISPER_MODEL_CACHE_DIR: /models/whisper
       HF_HOME: /models/whisper
       HUGGINGFACE_HUB_CACHE: /models/whisper/hub
-      DIARIZATION_ENABLED: ${DIARIZATION_ENABLED:-false}
-      DIARIZATION_DEVICE: cuda
-      DIARIZATION_MODEL_CACHE_DIR: /models/diarization
+      DIARIZATION_ENABLED: "false"
     gpus:
       - driver: nvidia
         count: all

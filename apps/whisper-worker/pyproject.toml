@@ -34,6 +34,12 @@ diarization = [
   "torch>=2.1,<2.4",
   "torchaudio>=2.1,<2.4",
 ]
+nemo-diarization = [
+  "Cython>=3.0,<4.0",
+  "packaging>=23.0",
+  "huggingface-hub>=0.21,<1.0",
+  "nemo_toolkit[asr]>=2.0,<3.0",
+]
 
 [project.scripts]
 whisper-worker = "whisper_worker.__main__:main"

@@ -126,7 +126,8 @@ services:
     build:
       context: ./apps/whisper-worker
       args:
-        INSTALL_DIARIZATION: ${INSTALL_DIARIZATION:-false}
+        INSTALL_DIARIZATION: "false"
+        INSTALL_NEMO_DIARIZATION: "false"
     environment:
       WHISPER_WORKER_LOG_LEVEL: ${WHISPER_WORKER_LOG_LEVEL:-info}
       WHISPER_WORKER_DATABASE_URL: ${WHISPER_WORKER_DATABASE_URL:-postgresql+psycopg://app:change-me@postgres:5432/obsidian_ai}
@@ -142,15 +143,7 @@ services:
       WHISPER_MODEL_CACHE_DIR: ${WHISPER_MODEL_CACHE_DIR:-/models/whisper}
       HF_HOME: ${HF_HOME:-/models/whisper}
       HUGGINGFACE_HUB_CACHE: ${HUGGINGFACE_HUB_CACHE:-/models/whisper/hub}
-      DIARIZATION_ENABLED: ${DIARIZATION_ENABLED:-false}
-      DIARIZATION_PROVIDER: ${DIARIZATION_PROVIDER:-pyannote}
-      DIARIZATION_MODEL: ${DIARIZATION_MODEL:-pyannote/speaker-diarization-3.1}
-      DIARIZATION_DEVICE: ${DIARIZATION_DEVICE:-cuda}
-      DIARIZATION_MODEL_CACHE_DIR: ${DIARIZATION_MODEL_CACHE_DIR:-/models/diarization}
-      DIARIZATION_MIN_SPEAKERS: "${DIARIZATION_MIN_SPEAKERS:-}"
-      DIARIZATION_MAX_SPEAKERS: "${DIARIZATION_MAX_SPEAKERS:-}"
-      DIARIZATION_TIMEOUT_SECONDS: "${DIARIZATION_TIMEOUT_SECONDS:-300}"
-      DIARIZATION_MAX_AUDIO_SECONDS: "${DIARIZATION_MAX_AUDIO_SECONDS:-}"
+      DIARIZATION_ENABLED: "false"
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     depends_on:
@@ -163,7 +156,6 @@ services:
     volumes:
       - audio-storage:/data/audio
       - whisper-model-cache:/models/whisper
-      - diarization-model-cache:/models/diarization
     restart: unless-stopped
 
   postgres:
@@ -224,6 +216,5 @@ networks:
 volumes:
   audio-storage:
   whisper-model-cache:
-  diarization-model-cache:
   postgres-data:
   ollama-data:

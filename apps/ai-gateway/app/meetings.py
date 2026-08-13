@@ -94,6 +94,18 @@ class DeepThinkRenderedSection:
     markdown: str
 
 
+DEEP_THINK_CORE_SECTIONS = [
+    "Resume detaille",
+    "Sujets abordes",
+    "Decisions",
+    "Actions",
+    "Points ouverts et incertitudes",
+    "Participants et references utiles",
+]
+
+SOURCE_NOTE_SKELETON_TITLES = {"notes", "resume", "résumé", "actions", "personnes rencontrees", "personnes rencontrées"}
+
+
 def prepare_meeting_request(payload: MeetingGenerateRequest, settings: Settings) -> PreparedMeetingRequest:
     return prepare_meeting_inputs(
         title=payload.title,
@@ -415,8 +427,10 @@ def build_meeting_user_prompt_from_brief(prepared_request: PreparedMeetingReques
 def build_deep_think_sections(prepared_request: PreparedMeetingRequest, settings: Settings) -> list[DeepThinkSection]:
     manual_sections = extract_manual_note_sections(prepared_request.manual_notes)
     max_sections = max(1, settings.meeting_deep_think_max_sections)
-    if not manual_sections:
-        manual_sections = build_generic_manual_sections(prepared_request.manual_notes)
+    if should_use_core_deep_think_sections(manual_sections):
+        manual_sections = build_core_deep_think_sections(prepared_request.manual_notes)
+    elif not manual_sections:
+        manual_sections = build_core_deep_think_sections(prepared_request.manual_notes)
 
     sections: list[DeepThinkSection] = []
     for title, manual_notes in manual_sections[:max_sections]:
@@ -440,6 +454,20 @@ def build_deep_think_sections(prepared_request: PreparedMeetingRequest, settings
     return sections
 
 
+def should_use_core_deep_think_sections(manual_sections: list[tuple[str, str]]) -> bool:
+    if not manual_sections:
+        return True
+    normalized_titles = {normalize_section_title(title) for title, _content in manual_sections}
+    return normalized_titles.issubset(SOURCE_NOTE_SKELETON_TITLES)
+
+
+def normalize_section_title(title: str) -> str:
+    title = re.sub(r"[*_`#]", "", title).strip().lower()
+    title = title.replace("é", "e").replace("è", "e").replace("ê", "e").replace("à", "a")
+    title = title.replace("ç", "c").replace("ù", "u")
+    return re.sub(r"\s+", " ", title)
+
+
 def extract_manual_note_sections(manual_notes: str) -> list[tuple[str, str]]:
     body = strip_frontmatter(manual_notes.strip())
     heading_matches = list(re.finditer(r"(?m)^(#{2,4})\s+(.+?)\s*$", body))
@@ -449,22 +477,27 @@ def extract_manual_note_sections(manual_notes: str) -> list[tuple[str, str]]:
         start = match.end()
         end = heading_matches[index + 1].start() if index + 1 < len(heading_matches) else len(body)
         content = body[start:end].strip()
+        content = remove_empty_meeting_note_placeholders(content)
         if title and content:
             sections.append((title, content))
     return sections
 
 
-def build_generic_manual_sections(manual_notes: str) -> list[tuple[str, str]]:
+def build_core_deep_think_sections(manual_notes: str) -> list[tuple[str, str]]:
     cleaned = strip_frontmatter(manual_notes.strip())
-    return [
-        ("Executive summary and objective", cleaned[:5000]),
-        ("Topics discussed", cleaned),
-        ("Decisions, actions and open points", cleaned),
-    ] if cleaned else [
-        ("Executive summary and objective", ""),
-        ("Topics discussed", ""),
-        ("Decisions, actions and open points", ""),
-    ]
+    return [(title, cleaned) for title in DEEP_THINK_CORE_SECTIONS]
+
+
+def remove_empty_meeting_note_placeholders(content: str) -> str:
+    lines: list[str] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped in {"-", "- ", "- [ ]", "- [[ ]]", "- [[ ]]"}:
+            continue
+        if re.fullmatch(r"-\s*\[\[\s*\]\]", stripped):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def strip_frontmatter(markdown: str) -> str:
@@ -521,12 +554,14 @@ def extract_keywords(text: str) -> list[str]:
 def build_deep_think_section_system_prompt(output_language: str) -> str:
     language_instruction = OUTPUT_LANGUAGE_INSTRUCTIONS.get(output_language, OUTPUT_LANGUAGE_INSTRUCTIONS["same_as_meeting"])
     return (
-        "You write one section of detailed, concrete Markdown meeting minutes.\n"
+        "You write exactly one requested section of detailed, concrete Markdown meeting minutes.\n"
         "Manual notes are the priority source. Transcript excerpts can enrich them but must not replace them.\n"
         "Anonymous speaker labels can help follow the exchange, but do not convert them into real names unless explicitly supported.\n"
         "Preserve useful bullets, questions, answers, pillar names, decisions, actions and open points.\n"
         "Do not invent owners, dates, decisions or answers. Put uncertain items under uncertainties.\n"
-        "Return only the final Markdown for this section. Do not include source labels, prompt text, or triple backticks.\n\n"
+        "Do not write a complete meeting report. Do not add unrelated sections such as summary, actions, participants, or transcript hints unless they are the requested section.\n"
+        "Do not include source labels, prompt text, language hints, raw transcript labels, or triple backticks.\n"
+        "Return only concise Markdown bullets or paragraphs for the requested section, without a top-level report title.\n\n"
         f"{language_instruction}"
     )
 
@@ -537,13 +572,13 @@ def build_deep_think_section_user_prompt(prepared_request: PreparedMeetingReques
         f"Meeting title: {prepared_request.title}\n"
         f"Section to write: {section.title}\n"
         f"Participants: {participants_block}\n\n"
-        "Template guidance:\n"
+        "Global template guidance. Use only as style guidance; do not reproduce the full template in this section:\n"
         f"{prepared_request.template}\n\n"
         "Manual notes for this section:\n"
         f"{section.manual_notes or 'No manual notes for this section.'}\n\n"
         "Relevant transcript excerpts:\n"
         f"{section.transcript_excerpt}\n\n"
-        "Write this section as useful meeting minutes. Keep it detailed enough to preserve concrete information."
+        f"Write only the section named '{section.title}'. If there is no useful supported information for this exact section, return an empty string."
     )
 
 
@@ -555,14 +590,65 @@ def assemble_deep_think_report(
 ) -> str:
     parts = [f"# Compte rendu - {prepared_request.title}"]
     for section in rendered_sections:
-        markdown = section.markdown.strip()
+        markdown = clean_deep_think_section_markdown(section.markdown, section.title)
         if not markdown:
             continue
-        if not markdown.lstrip().startswith("#"):
-            markdown = f"## {section.title}\n\n{markdown}"
-        parts.append(markdown)
+        parts.append(f"## {section.title}\n\n{markdown}")
     result = "\n\n".join(parts).strip()
     return clean_deep_think_markdown(result) if final_cleanup else result
+
+
+def clean_deep_think_section_markdown(markdown: str, section_title: str) -> str:
+    cleaned = markdown.strip()
+    fence_match = re.match(r"(?s)^```(?:markdown|md)?\s*(.*?)\s*```$", cleaned, re.IGNORECASE)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+    cleaned = re.sub(r"(?im)^\s*(Generating section|Task instruction|Text to process|Manual notes|Transcript|Language instruction|Transcription language hint)\s*:.*\n?", "", cleaned)
+    cleaned = re.sub(r"(?im)^#{1,2}\s*(compte rendu|meeting minutes|compte-rendu|note compagnon).*$\n?", "", cleaned)
+    cleaned = re.sub(r"(?im)^#{1,3}\s*transcription language hint\s*$\n?(?:[\s\S]*?)(?=\n#{1,3}\s|\Z)", "", cleaned)
+    cleaned = strip_redundant_outer_heading(cleaned, section_title)
+    cleaned = re.sub(r"(?im)^#{1,3}\s*transcription language hint\s*$\n?(?:[\s\S]*?)(?=\n#{1,3}\s|\Z)", "", cleaned)
+    cleaned = remove_empty_or_unsupported_lines(cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def strip_redundant_outer_heading(markdown: str, section_title: str) -> str:
+    lines = markdown.splitlines()
+    while lines and re.match(r"^\s*#{1,4}\s+", lines[0]):
+        heading = re.sub(r"^\s*#{1,4}\s+", "", lines[0]).strip()
+        if normalize_section_title(heading) == normalize_section_title(section_title) or len(lines) > 1:
+            lines = lines[1:]
+            while lines and not lines[0].strip():
+                lines = lines[1:]
+            continue
+        break
+    return "\n".join(lines).strip()
+
+
+def remove_empty_or_unsupported_lines(markdown: str) -> str:
+    banned_phrases = [
+        "aucune information disponible",
+        "aucune decision formelle",
+        "aucune décision formelle",
+        "aucune liste de participants",
+        "aucun point ouvert",
+        "aucune incertitude",
+        "no information available",
+        "no formal decision",
+        "no participants",
+        "no open point",
+    ]
+    kept: list[str] = []
+    for line in markdown.splitlines():
+        lowered = line.strip().lower()
+        if not lowered:
+            kept.append(line)
+            continue
+        if any(phrase in lowered for phrase in banned_phrases):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def clean_deep_think_markdown(markdown: str) -> str:
@@ -570,6 +656,7 @@ def clean_deep_think_markdown(markdown: str) -> str:
     fence_match = re.match(r"(?s)^```(?:markdown|md)?\s*(.*?)\s*```$", cleaned, re.IGNORECASE)
     if fence_match:
         cleaned = fence_match.group(1).strip()
-    cleaned = re.sub(r"(?im)^\s*(Generating section|Task instruction|Text to process|Manual notes|Transcript)\s*:.*\n?", "", cleaned)
+    cleaned = re.sub(r"(?im)^\s*(Generating section|Task instruction|Text to process|Manual notes|Transcript|Language instruction|Transcription language hint)\s*:.*\n?", "", cleaned)
+    cleaned = re.sub(r"(?im)^#{1,3}\s*transcription language hint\s*$\n?(?:[\s\S]*?)(?=\n#{1,3}\s|\Z)", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()

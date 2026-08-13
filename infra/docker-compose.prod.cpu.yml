@@ -27,7 +27,5 @@ services:
       WHISPER_MODEL_CACHE_DIR: /models/whisper
       HF_HOME: /models/whisper
       HUGGINGFACE_HUB_CACHE: /models/whisper/hub
-      DIARIZATION_ENABLED: ${DIARIZATION_ENABLED:-false}
-      DIARIZATION_DEVICE: cpu
-      DIARIZATION_MODEL_CACHE_DIR: /models/diarization
+      DIARIZATION_ENABLED: "false"
     gpus: []

@@ -79,6 +79,35 @@ class FakeMeetingOllamaClient:
         return OllamaChatResult(model=model, content="## Brief\n\n- Decision candidate: conserver le budget.")
 
 
+class NoisyDeepThinkClient(FakeMeetingOllamaClient):
+    async def generate_meeting(
+        self,
+        *,
+        model: str,
+        title: str,
+        transcript_chars: int,
+        manual_notes_chars: int,
+        template_chars: int,
+        participants: list[str],
+        system_prompt: str,
+        user_prompt: str,
+    ) -> OllamaChatResult:
+        self.system_prompts.append(system_prompt)
+        self.user_prompts.append(user_prompt)
+        return OllamaChatResult(
+            model=model,
+            content=(
+                "# Compte rendu de reunion\n\n"
+                "## Resume executif\n\n"
+                "- Information utile conservee.\n\n"
+                "## Transcription language hint\n"
+                "Le texte est en francais.\n\n"
+                "## Decisions\n"
+                "Aucune decision formelle n'a ete prise."
+            ),
+        )
+
+
 def create_token(scopes: list[str], user_id: str | None = None) -> str:
     with get_session_factory()() as session:
         created_token = create_api_token(session, name="meeting-token", scopes=scopes, user_id=user_id)
@@ -115,6 +144,7 @@ def create_completed_audio_job(
     *,
     user_id: str,
     transcript_text: str = "Transcript job complete.",
+    diarization_status: str = "disabled",
     job_type: str = "audio_transcription",
     status: str = "completed",
     with_result: bool = True,
@@ -147,6 +177,8 @@ def create_completed_audio_job(
                             "text": transcript_text,
                             "language": "fr",
                             "duration": 0,
+                            "diarization_enabled": diarization_status != "disabled",
+                            "diarization_status": diarization_status,
                             "segments": [{"start": 0, "end": 1, "text": transcript_text}],
                         }
                     ),
@@ -238,10 +270,84 @@ def test_meeting_generate_deep_think_uses_section_calls(client: TestClient, monk
     payload = response.json()
     assert payload["generation_mode"] == "deep_think"
     assert payload["generation_stages"] == 2
+    assert payload["generation_analysis"]["mode"] == "deep_think"
+    assert payload["generation_analysis"]["sections_count"] == 2
+    assert payload["generation_analysis"]["section_titles"] == ["IAM", "Endpoint"]
+    assert payload["generation_analysis"]["transcript_chars"] > 0
+    assert payload["generation_analysis"]["manual_notes_chars"] > 0
     assert len(fake_client.user_prompts) == 2
     assert fake_client.predigest_user_prompts == []
     assert "Section to write: IAM" in fake_client.user_prompts[0]
     assert "Section to write: Endpoint" in fake_client.user_prompts[1]
+    assert "Identify IAM owners" not in json.dumps(payload["generation_analysis"])
+    assert "Endpoint EDR coverage" not in json.dumps(payload["generation_analysis"])
+
+
+def test_meeting_generate_deep_think_source_note_template_uses_core_sections(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("MEETING_DEEP_THINK_MAX_SECTIONS", "6")
+    get_settings.cache_clear()
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(
+            generation_mode="deep_think",
+            manual_notes=(
+                "---\ntype: meeting\n---\n\n"
+                "## Notes\nResultats Parcoursup\n- Sante\n- Droit\n\n"
+                "## Resume\n-\n\n"
+                "## Actions\n- Attentes des candidats\n\n"
+                "## Personnes rencontrees\n- [[ ]]\n"
+            ),
+            transcript="Parcoursup a battu des records avec les voeux en sante et en droit.",
+        ),
+    )
+
+    app.dependency_overrides.clear()
+    get_settings.cache_clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["generation_analysis"]["section_titles"] == [
+        "Resume detaille",
+        "Sujets abordes",
+        "Decisions",
+        "Actions",
+        "Points ouverts et incertitudes",
+        "Participants et references utiles",
+    ]
+    assert "Section to write: Resume detaille" in fake_client.user_prompts[0]
+
+
+def test_meeting_generate_deep_think_cleans_noisy_section_reports(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("MEETING_DEEP_THINK_MAX_SECTIONS", "1")
+    get_settings.cache_clear()
+    fake_client = NoisyDeepThinkClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(
+            generation_mode="deep_think",
+            manual_notes="## IAM\n- Identifier les responsables IAM.",
+            transcript="Les responsables IAM doivent etre identifies.",
+        ),
+    )
+
+    app.dependency_overrides.clear()
+    get_settings.cache_clear()
+
+    assert response.status_code == 200
+    markdown = response.json()["meeting_markdown"]
+    assert markdown.count("# Compte rendu") == 1
+    assert "Transcription language hint" not in markdown
+    assert "Aucune decision formelle" not in markdown
+    assert "Information utile conservee" in markdown
 
 
 def test_meeting_generate_deep_think_can_be_disabled(client: TestClient, monkeypatch) -> None:
@@ -528,6 +634,41 @@ def test_meeting_generate_from_job_accepts_completed_job(client: TestClient) -> 
     assert response.status_code == 200
     assert response.json()["job_id"] == job_id
     assert response.json()["meeting_markdown"] == "## Resume executif\n\nCompte rendu mocke."
+    assert response.json()["generation_analysis"] is None
+
+
+def test_meeting_generate_from_job_deep_think_returns_safe_analysis(client: TestClient) -> None:
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"], user_id="user-job-deep-analysis")
+    job_id = create_completed_audio_job(
+        user_id="user-job-deep-analysis",
+        transcript_text="SECRET_TRANSCRIPT CouchDB LiveSync discussion.",
+        diarization_status="failed",
+    )
+
+    response = client.post(
+        "/v1/meetings/generate-from-job",
+        headers=create_bearer_header(token),
+        json=valid_generate_from_job_payload(
+            job_id,
+            generation_mode="deep_think",
+            manual_notes="## Context\nSECRET_NOTES manual decisions.",
+        ),
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["generation_mode"] == "deep_think"
+    assert payload["generation_stages"] == 1
+    assert payload["generation_analysis"]["mode"] == "deep_think"
+    assert payload["generation_analysis"]["section_titles"] == ["Context"]
+    assert payload["generation_analysis"]["diarization_status"] == "failed"
+    serialized_analysis = json.dumps(payload["generation_analysis"])
+    assert "SECRET_TRANSCRIPT" not in serialized_analysis
+    assert "SECRET_NOTES" not in serialized_analysis
 
 
 def test_meeting_generate_from_job_transmits_output_language(client: TestClient) -> None:
