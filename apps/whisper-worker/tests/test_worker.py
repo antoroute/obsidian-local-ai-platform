@@ -1,40 +1,23 @@
 import json
 import sys
-import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 from whisper_worker.database import Base, create_engine_for_settings, create_session_factory
-from whisper_worker.diarization import (
-    NemoSortformerDiarizationEngine,
-    SpeakerTurn,
-    apply_diarization_to_segments,
-    build_offline_pyannote_pipeline_config,
-    download_required_pyannote_snapshots,
-    get_sortformer_model_path,
-    load_pyannote_pipeline,
-    normalize_pyannote_load_error,
-    parse_sortformer_segments,
-    required_pyannote_dependency_models,
-)
 from whisper_worker.engines import (
-    DiarizationTimeoutError,
-    DiarizingTranscriptionEngine,
     FakeTranscriptionEngine,
     FasterWhisperEngine,
     check_engine,
     create_engine,
     normalize_faster_whisper_error,
-    run_diarization_with_timeout,
-    should_skip_diarization_for_duration,
 )
 from whisper_worker.models import Job
 from whisper_worker.processor import process_audio_job
 from whisper_worker.processor import validate_transcript_has_speech
 from whisper_worker.repositories import JOB_STATUS_COMPLETED, JOB_STATUS_FAILED
 from whisper_worker.config import WorkerSettings
-from whisper_worker.repositories import TranscriptSegment
 
 
 def make_settings(tmp_path) -> WorkerSettings:
@@ -71,12 +54,6 @@ def seed_job(session_factory, input_path: Path, job_id: str = "job-1", metadata:
         )
         session.add(job)
         session.commit()
-
-
-def slow_diarization_runner(input_path: Path, settings: WorkerSettings) -> list[SpeakerTurn]:
-    del input_path, settings
-    time.sleep(10)
-    return [SpeakerTurn(start=0.0, end=1.0, speaker="Speaker 1")]
 
 
 def test_fake_engine_returns_deterministic_transcript(tmp_path) -> None:
@@ -119,324 +96,21 @@ def test_transcript_with_speech_is_accepted() -> None:
     validate_transcript_has_speech("Bonjour.")
 
 
-def test_transcript_result_serializes_optional_speaker(tmp_path) -> None:
+def test_transcript_result_keeps_legacy_diarization_fields_disabled(tmp_path) -> None:
     engine = FakeTranscriptionEngine()
 
     result = engine.transcribe(tmp_path / "input.mp3")
-    segment = result.segments[0]
-    enriched = type(result)(
-        text=result.text,
-        language=result.language,
-        duration=result.duration,
-        segments=[TranscriptSegment(start=segment.start, end=segment.end, text=segment.text, speaker="Speaker 1")],
-        diarization_enabled=True,
-        diarization_status="completed",
-    )
+    payload = result.to_dict()
 
-    payload = enriched.to_dict()
-
-    assert payload["diarization_enabled"] is True
-    assert payload["diarization_status"] == "completed"
-    assert payload["segments"][0]["speaker"] == "Speaker 1"  # type: ignore[index]
-
-
-def test_diarization_assigns_speaker_by_overlap() -> None:
-    segments = [
-        TranscriptSegment(start=0.0, end=2.0, text="Hello"),
-        TranscriptSegment(start=2.0, end=4.0, text="Bonjour"),
-    ]
-    turns = [
-        SpeakerTurn(start=0.0, end=1.8, speaker="Speaker 1"),
-        SpeakerTurn(start=2.1, end=3.8, speaker="Speaker 2"),
-    ]
-
-    enriched = apply_diarization_to_segments(segments, turns)
-
-    assert enriched[0].speaker == "Speaker 1"
-    assert enriched[1].speaker == "Speaker 2"
-
-
-def test_runtime_pyannote_load_uses_local_files_only(tmp_path) -> None:
-    class FakePipeline:
-        captured_kwargs: dict[str, object] | None = None
-        captured_model_name: str | None = None
-        captured_hf_offline: str | None = None
-
-        @classmethod
-        def from_pretrained(cls, model_name: str, **kwargs):
-            cls.captured_model_name = model_name
-            cls.captured_kwargs = kwargs
-            import os
-
-            cls.captured_hf_offline = os.getenv("HF_HUB_OFFLINE")
-            return object()
-
-    seed_pyannote_cache(tmp_path)
-
-    load_pyannote_pipeline(
-        FakePipeline,
-        "pyannote/speaker-diarization-3.1",
-        cache_dir=tmp_path,
-        local_files_only=True,
-    )
-
-    assert FakePipeline.captured_kwargs is not None
-    assert FakePipeline.captured_model_name is not None
-    captured_model_name = FakePipeline.captured_model_name.replace("\\", "/")
-    assert captured_model_name.endswith("offline-configs/pyannote--speaker-diarization-3.1.yaml")
-    assert "local_files_only" not in FakePipeline.captured_kwargs
-    assert FakePipeline.captured_hf_offline == "1"
-
-
-def test_prepare_pyannote_load_allows_download(tmp_path) -> None:
-    class FakePipeline:
-        captured_kwargs: dict[str, object] | None = None
-
-        @classmethod
-        def from_pretrained(cls, model_name: str, **kwargs):
-            assert model_name == "pyannote/speaker-diarization-3.1"
-            cls.captured_kwargs = kwargs
-            return object()
-
-    load_pyannote_pipeline(
-        FakePipeline,
-        "pyannote/speaker-diarization-3.1",
-        cache_dir=tmp_path,
-        local_files_only=False,
-    )
-
-    assert FakePipeline.captured_kwargs is not None
-    assert "local_files_only" not in FakePipeline.captured_kwargs
-
-
-def test_prepare_downloads_pyannote_pipeline_dependencies(monkeypatch, tmp_path) -> None:
-    calls: list[str] = []
-
-    fake_module = ModuleType("huggingface_hub")
-
-    def fake_snapshot_download(repo_id: str, **kwargs):
-        calls.append(repo_id)
-        assert kwargs["cache_dir"] == str(tmp_path)
-        return str(tmp_path / repo_id.replace("/", "--"))
-
-    fake_module.snapshot_download = fake_snapshot_download
-    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_module)
-
-    download_required_pyannote_snapshots("pyannote/speaker-diarization-3.1", tmp_path)
-
-    assert calls == [
-        "pyannote/speaker-diarization-3.1",
-        "pyannote/segmentation-3.0",
-        "pyannote/wespeaker-voxceleb-resnet34-LM",
-    ]
-
-
-def test_required_pyannote_dependency_models_are_explicit() -> None:
-    assert required_pyannote_dependency_models("pyannote/speaker-diarization-3.1") == [
-        "pyannote/segmentation-3.0",
-        "pyannote/wespeaker-voxceleb-resnet34-LM",
-    ]
-
-
-def test_parse_sortformer_segments_accepts_common_shapes() -> None:
-    parsed = parse_sortformer_segments([
-        ["0.0", "1.5", "speaker_0"],
-        {"start": 1.5, "end": 2.0, "speaker": "speaker_1"},
-        "2.0 3.0 speaker_0",
-    ])
-
-    assert parsed == [
-        SpeakerTurn(start=0.0, end=1.5, speaker="Speaker 1"),
-        SpeakerTurn(start=1.5, end=2.0, speaker="Speaker 2"),
-        SpeakerTurn(start=2.0, end=3.0, speaker="Speaker 1"),
-    ]
-
-
-def test_parse_sortformer_segments_accepts_single_file_nested_output() -> None:
-    parsed = parse_sortformer_segments([[("0.0", "1.0", "0")]])
-
-    assert parsed == [SpeakerTurn(start=0.0, end=1.0, speaker="Speaker 1")]
-
-
-def test_get_sortformer_model_path_finds_cached_nemo_file(tmp_path) -> None:
-    model_path = tmp_path / "models--nvidia--diar_sortformer_4spk-v1" / "snapshots" / "test" / "diar_sortformer_4spk-v1.nemo"
-    model_path.parent.mkdir(parents=True)
-    model_path.write_text("model", encoding="utf-8")
-
-    assert get_sortformer_model_path(tmp_path, "nvidia/diar_sortformer_4spk-v1") == model_path
-
-
-def test_nemo_sortformer_engine_converts_model_output(tmp_path, monkeypatch) -> None:
-    input_path = tmp_path / "input.webm"
-    input_path.write_bytes(b"audio")
-
-    class FakeModel:
-        def diarize(self, audio: str, batch_size: int):
-            assert Path(audio).suffix == ".wav"
-            assert batch_size == 1
-            return [["0.0 1.0 speaker_0", "1.0 2.0 speaker_1"]]
-
-    def fake_convert_audio_for_sortformer(source: Path, target: Path) -> None:
-        assert source == input_path
-        target.write_bytes(b"wav")
-
-    monkeypatch.setattr("whisper_worker.diarization.convert_audio_for_sortformer", fake_convert_audio_for_sortformer)
-
-    turns = NemoSortformerDiarizationEngine(FakeModel()).diarize(input_path)
-
-    assert turns == [
-        SpeakerTurn(start=0.0, end=1.0, speaker="Speaker 1"),
-        SpeakerTurn(start=1.0, end=2.0, speaker="Speaker 2"),
-    ]
-
-
-def test_offline_pyannote_config_points_to_local_checkpoints(tmp_path) -> None:
-    seed_pyannote_cache(tmp_path)
-
-    config_path = build_offline_pyannote_pipeline_config(tmp_path, "pyannote/speaker-diarization-3.1")
-    text = config_path.read_text(encoding="utf-8")
-
-    assert "pyannote/segmentation-3.0" not in text
-    assert "pyannote/wespeaker-voxceleb-resnet34-LM" not in text
-    assert "models--pyannote--segmentation-3.0" in text
-    assert "models--pyannote--wespeaker-voxceleb-resnet34-LM" in text
-    assert "pytorch_model.bin" in text
-
-
-def test_normalize_pyannote_load_error_reports_missing_local_cache() -> None:
-    error = RuntimeError("LocalEntryNotFoundError: cannot find the requested files in the local cache")
-
-    normalized = normalize_pyannote_load_error(
-        error,
-        "pyannote/speaker-diarization-3.1",
-        local_files_only=True,
-    )
-
-    assert "not available in the local cache" in str(normalized)
-    assert "prepare-diarization-model.ps1" in str(normalized)
-
-
-def test_runtime_pyannote_load_rejects_incomplete_cache(tmp_path) -> None:
-    class FakePipeline:
-        @classmethod
-        def from_pretrained(cls, model_name: str, **kwargs):
-            raise AssertionError("from_pretrained should not be called when cache is incomplete")
-
-    try:
-        load_pyannote_pipeline(
-            FakePipeline,
-            "pyannote/speaker-diarization-3.1",
-            cache_dir=tmp_path,
-            local_files_only=True,
-        )
-    except RuntimeError as exc:
-        assert "not fully available in the local cache" in str(exc)
-        assert "pyannote/segmentation-3.0/pytorch_model.bin" in str(exc)
-    else:
-        raise AssertionError("Expected RuntimeError for incomplete pyannote cache")
-
-
-def seed_pyannote_cache(cache_dir: Path) -> None:
-    for model_name, file_name in [
-        ("pyannote/speaker-diarization-3.1", "config.yaml"),
-        ("pyannote/segmentation-3.0", "pytorch_model.bin"),
-        ("pyannote/wespeaker-voxceleb-resnet34-LM", "pytorch_model.bin"),
-    ]:
-        snapshot_dir = cache_dir / f"models--{model_name.replace('/', '--')}" / "snapshots" / "test"
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
-        if model_name == "pyannote/speaker-diarization-3.1":
-            (snapshot_dir / file_name).write_text(
-                """
-version: 3.1.0
-pipeline:
-  name: pyannote.audio.pipelines.SpeakerDiarization
-  params:
-    embedding: pyannote/wespeaker-voxceleb-resnet34-LM
-    segmentation: pyannote/segmentation-3.0
-params: {}
-""".strip(),
-                encoding="utf-8",
-            )
-        else:
-            (snapshot_dir / file_name).write_text("cache", encoding="utf-8")
+    assert payload["diarization_enabled"] is False
+    assert payload["diarization_status"] == "disabled"
+    assert "speaker" not in payload["segments"][0]  # type: ignore[operator]
 
 
 def test_fake_engine_remains_selectable(tmp_path) -> None:
     engine = create_engine(make_settings(tmp_path))
 
     assert isinstance(engine, FakeTranscriptionEngine)
-
-
-def test_engine_factory_wraps_diarization_when_enabled(tmp_path) -> None:
-    settings = make_settings(tmp_path)
-    settings = WorkerSettings(
-        **{
-            **settings.__dict__,
-            "diarization_enabled": True,
-        }
-    )
-
-    engine = create_engine(settings)
-
-    assert isinstance(engine, DiarizingTranscriptionEngine)
-
-
-def test_diarization_adds_speaker_labels_without_timeout(tmp_path, monkeypatch) -> None:
-    class FastDiarizationEngine:
-        def diarize(self, input_path: Path):
-            return [SpeakerTurn(start=0.0, end=1.0, speaker="Speaker 1")]
-
-    def fake_create_diarization_engine(settings):
-        return FastDiarizationEngine()
-
-    monkeypatch.setattr("whisper_worker.engines.create_diarization_engine", fake_create_diarization_engine)
-    settings = WorkerSettings(**{**make_settings(tmp_path).__dict__, "diarization_enabled": True})
-    engine = DiarizingTranscriptionEngine(FakeTranscriptionEngine(), settings)
-
-    result = engine.transcribe(tmp_path / "a.mp3")
-
-    assert result.diarization_status == "completed"
-    assert result.segments[0].speaker == "Speaker 1"
-
-
-def test_diarization_timeout_preserves_whisper_transcript(tmp_path) -> None:
-    settings = make_settings(tmp_path)
-
-    try:
-        run_diarization_with_timeout(
-            tmp_path / "input.mp3",
-            settings,
-            timeout_seconds=1,
-            runner=slow_diarization_runner,
-        )
-    except DiarizationTimeoutError as exc:
-        assert "exceeded 1 seconds" in str(exc)
-    else:
-        raise AssertionError("Expected diarization timeout")
-
-
-def test_diarization_timeout_marks_diarization_failed_without_failing_transcription(tmp_path, monkeypatch) -> None:
-    def fake_run_diarization_with_timeout(input_path, settings, *, timeout_seconds):
-        del input_path, settings, timeout_seconds
-        raise DiarizationTimeoutError("Diarization exceeded 1 seconds.")
-
-    monkeypatch.setattr("whisper_worker.engines.run_diarization_with_timeout", fake_run_diarization_with_timeout)
-    settings = WorkerSettings(**{**make_settings(tmp_path).__dict__, "diarization_enabled": True})
-    engine = DiarizingTranscriptionEngine(FakeTranscriptionEngine(), settings)
-
-    result = engine.transcribe(tmp_path / "input.mp3")
-
-    assert result.text == "Fake transcript for testing."
-    assert result.diarization_enabled is True
-    assert result.diarization_status == "failed"
-    assert result.segments[0].speaker is None
-
-
-def test_diarization_max_audio_seconds_skips_long_audio() -> None:
-    assert should_skip_diarization_for_duration(3618.6, 3600) is True
-    assert should_skip_diarization_for_duration(120.0, 3600) is False
-    assert should_skip_diarization_for_duration(3618.6, None) is False
-    assert should_skip_diarization_for_duration(3618.6, 0) is False
 
 
 def test_engine_factory_rejects_unknown_value(tmp_path) -> None:
@@ -524,6 +198,38 @@ def test_faster_whisper_engine_converts_segments(monkeypatch, tmp_path) -> None:
     assert result.segments[1].text == "le monde"
     assert engine._model.vad_filter is True
     assert engine._model.condition_on_previous_text is False
+
+
+def test_faster_whisper_consumes_lazy_segments_before_normalized_audio_is_deleted(monkeypatch, tmp_path) -> None:
+    normalized_path = tmp_path / "normalized.wav"
+
+    @contextmanager
+    def fake_normalize_audio(input_path: Path):
+        del input_path
+        normalized_path.write_bytes(b"wav")
+        try:
+            yield normalized_path
+        finally:
+            normalized_path.unlink()
+
+    class LazyWhisperModel:
+        def transcribe(self, input_path: str, **kwargs):
+            del kwargs
+
+            def segments():
+                assert Path(input_path).exists()
+                yield SimpleNamespace(start=0.0, end=1.0, text=" Bonjour")
+
+            return segments(), SimpleNamespace(language="fr", duration=1.0)
+
+    monkeypatch.setattr("whisper_worker.engines.normalize_audio_for_whisper", fake_normalize_audio)
+    input_path = tmp_path / "input.webm"
+    input_path.write_bytes(b"audio")
+
+    result = FasterWhisperEngine(LazyWhisperModel(), default_language=None, beam_size=5).transcribe(input_path)
+
+    assert result.text == "Bonjour"
+    assert normalized_path.exists() is False
 
 
 def test_faster_whisper_engine_uses_requested_french_language(tmp_path) -> None:

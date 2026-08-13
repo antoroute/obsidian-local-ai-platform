@@ -12,11 +12,6 @@ RUN apt-get update \
 COPY pyproject.toml ./
 COPY src ./src
 
-ARG INSTALL_DIARIZATION=false
-RUN pip install --no-cache-dir .[faster-whisper] \
-    && if [ "$INSTALL_DIARIZATION" = "true" ]; then \
-        pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.3.1 torchaudio==2.3.1; \
-        pip install --no-cache-dir .[diarization]; \
-    fi
+RUN pip install --no-cache-dir .[faster-whisper]
 
 CMD ["python", "-m", "whisper_worker"]

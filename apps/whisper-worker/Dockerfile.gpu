@@ -43,18 +43,6 @@ PY
 COPY pyproject.toml ./
 COPY src ./src
 
-ARG INSTALL_DIARIZATION=false
-ARG INSTALL_NEMO_DIARIZATION=false
-RUN pip install --no-cache-dir .[faster-whisper] \
-    && if [ "$INSTALL_DIARIZATION" = "true" ]; then \
-        pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 torch==2.3.1 torchaudio==2.3.1; \
-        pip install --no-cache-dir .[diarization]; \
-        pip uninstall -y onnxruntime; \
-        pip install --no-cache-dir onnxruntime-gpu==1.18.1; \
-    fi \
-    && if [ "$INSTALL_NEMO_DIARIZATION" = "true" ]; then \
-        pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 torch==2.6.0 torchaudio==2.6.0; \
-        pip install --no-cache-dir .[nemo-diarization]; \
-    fi
+RUN pip install --no-cache-dir .[faster-whisper]
 
 CMD ["python", "-m", "whisper_worker"]
