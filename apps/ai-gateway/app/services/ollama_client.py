@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -62,38 +65,58 @@ class OllamaCheckResult:
     chat_content: str
 
 
+class OllamaRequestLimiter:
+    """Share one bounded Ollama request queue across chat and embeddings."""
+
+    def __init__(self, max_concurrent_requests: int) -> None:
+        if max_concurrent_requests < 1:
+            raise ValueError("max_concurrent_requests must be at least 1")
+        self._semaphore = asyncio.Semaphore(max_concurrent_requests)
+
+    @asynccontextmanager
+    async def slot(self) -> AsyncIterator[None]:
+        async with self._semaphore:
+            yield
+
+
 class OllamaClient:
     def __init__(
         self,
         *,
         base_url: str,
         timeout_seconds: int,
+        num_ctx: int | None = None,
+        keep_alive: str | None = None,
+        request_limiter: OllamaRequestLimiter | None = None,
         transport: httpx.BaseTransport | None = None,
         async_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_seconds
+        self._num_ctx = num_ctx
+        self._keep_alive = keep_alive
+        self._request_limiter = request_limiter
         self._transport = transport
         self._async_transport = async_transport
 
     async def summarize_markdown(self, *, model: str, system_prompt: str, user_prompt: str) -> OllamaChatResult:
-        payload = {
-            "model": model,
-            "stream": False,
-            "messages": [
+        payload = self._build_chat_payload(
+            model=model,
+            messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-        }
+        )
 
         try:
-            async with httpx.AsyncClient(
-                base_url=self._base_url,
-                timeout=self._timeout,
-                transport=self._async_transport,
-            ) as client:
-                response = await client.post("/api/chat", json=payload)
-                response.raise_for_status()
+            async with self._request_slot():
+                async with httpx.AsyncClient(
+                    base_url=self._base_url,
+                    timeout=self._timeout,
+                    transport=self._async_transport,
+                ) as client:
+                    response = await client.post("/api/chat", json=payload)
+                    response.raise_for_status()
         except httpx.TimeoutException as exc:
             raise self._build_transport_error(exc, model=model) from exc
         except httpx.ConnectError as exc:
@@ -123,11 +146,10 @@ class OllamaClient:
 
                 chat_response = client.post(
                     "/api/chat",
-                    json={
-                        "model": model,
-                        "stream": False,
-                        "messages": [{"role": "user", "content": "Reponds seulement OK"}],
-                    },
+                    json=self._build_chat_payload(
+                        model=model,
+                        messages=[{"role": "user", "content": "Reponds seulement OK"}],
+                    ),
                 )
                 chat_response.raise_for_status()
         except httpx.TimeoutException as exc:
@@ -147,6 +169,26 @@ class OllamaClient:
             chat_model=chat_model,
             chat_content=chat_content,
         )
+
+    def _build_chat_payload(self, *, model: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": model,
+            "stream": False,
+            "messages": messages,
+        }
+        if self._num_ctx is not None and self._num_ctx > 0:
+            payload["options"] = {"num_ctx": self._num_ctx}
+        if self._keep_alive:
+            payload["keep_alive"] = self._keep_alive
+        return payload
+
+    @asynccontextmanager
+    async def _request_slot(self) -> AsyncIterator[None]:
+        if self._request_limiter is None:
+            yield
+            return
+        async with self._request_limiter.slot():
+            yield
 
     def _parse_tags_response(self, response: httpx.Response) -> list[str]:
         try:

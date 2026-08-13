@@ -69,14 +69,22 @@ def test_create_token_command_does_not_mask_unexpected_errors(monkeypatch: pytes
 
 def test_check_ollama_command_reports_success(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     args = argparse.Namespace(model=None, base_url=None)
-    settings = SimpleNamespace(ollama_base_url="http://host.docker.internal:11434", default_model="mistral:latest", ollama_timeout_seconds=10)
+    settings = SimpleNamespace(
+        ollama_base_url="http://host.docker.internal:11434",
+        default_model="mistral:latest",
+        ollama_timeout_seconds=10,
+        ollama_num_ctx=8192,
+        ollama_keep_alive="5m",
+    )
 
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
 
     class FakeOllamaClient:
-        def __init__(self, *, base_url: str, timeout_seconds: int) -> None:
+        def __init__(self, *, base_url: str, timeout_seconds: int, num_ctx: int, keep_alive: str) -> None:
             assert base_url == settings.ollama_base_url
             assert timeout_seconds == settings.ollama_timeout_seconds
+            assert num_ctx == settings.ollama_num_ctx
+            assert keep_alive == settings.ollama_keep_alive
 
         def check_connectivity(self, *, model: str) -> OllamaCheckResult:
             assert model == settings.default_model
@@ -100,13 +108,19 @@ def test_check_ollama_command_reports_success(monkeypatch: pytest.MonkeyPatch, c
 
 def test_check_ollama_command_reports_connection_refused(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     args = argparse.Namespace(model="mistral:latest", base_url="http://host.docker.internal:11434")
-    settings = SimpleNamespace(ollama_base_url="http://unused", default_model="unused", ollama_timeout_seconds=10)
+    settings = SimpleNamespace(
+        ollama_base_url="http://unused",
+        default_model="unused",
+        ollama_timeout_seconds=10,
+        ollama_num_ctx=8192,
+        ollama_keep_alive="5m",
+    )
 
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
 
     class FakeOllamaClient:
-        def __init__(self, *, base_url: str, timeout_seconds: int) -> None:
-            del timeout_seconds
+        def __init__(self, *, base_url: str, timeout_seconds: int, num_ctx: int, keep_alive: str) -> None:
+            del timeout_seconds, num_ctx, keep_alive
             self.base_url = base_url
 
         def check_connectivity(self, *, model: str) -> OllamaCheckResult:

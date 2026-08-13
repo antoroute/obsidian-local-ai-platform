@@ -90,7 +90,12 @@ def check_ollama_command(args: argparse.Namespace) -> int:
     settings = get_settings()
     base_url = (args.base_url or settings.ollama_base_url).rstrip("/")
     model = args.model or settings.default_model
-    client = OllamaClient(base_url=base_url, timeout_seconds=settings.ollama_timeout_seconds)
+    client = OllamaClient(
+        base_url=base_url,
+        timeout_seconds=settings.ollama_timeout_seconds,
+        num_ctx=settings.ollama_num_ctx,
+        keep_alive=settings.ollama_keep_alive,
+    )
 
     print(f"OLLAMA_BASE_URL: {base_url}")
     print(f"Model: {model}")
@@ -260,7 +265,12 @@ async def check_embedding_model(settings) -> list[float]:
 
 def check_chat_model(settings) -> None:
     print(f"Testing POST {settings.ollama_base_url.rstrip('/')}/api/chat with {settings.default_model} ...")
-    client = OllamaClient(base_url=settings.ollama_base_url, timeout_seconds=settings.ollama_timeout_seconds)
+    client = OllamaClient(
+        base_url=settings.ollama_base_url,
+        timeout_seconds=settings.ollama_timeout_seconds,
+        num_ctx=settings.ollama_num_ctx,
+        keep_alive=settings.ollama_keep_alive,
+    )
     client.check_connectivity(model=settings.default_model)
 
 

@@ -74,6 +74,8 @@ def check_engine_command() -> int:
     print(f"WHISPER_MODEL_SIZE={settings.whisper_model_size}")
     print(f"WHISPER_DEVICE={settings.whisper_device}")
     print(f"WHISPER_COMPUTE_TYPE={settings.whisper_compute_type}")
+    print(f"WHISPER_CPU_THREADS={settings.whisper_cpu_threads}")
+    print(f"WHISPER_NUM_WORKERS={settings.whisper_num_workers}")
     print(f"WHISPER_MODEL_CACHE_DIR={settings.whisper_model_cache_dir}")
     try:
         result = check_engine(settings)

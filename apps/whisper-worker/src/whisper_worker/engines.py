@@ -200,6 +200,8 @@ def _build_faster_whisper_model(settings: WorkerSettings) -> Any:
                 settings.whisper_model_size,
                 device=settings.whisper_device,
                 compute_type=settings.whisper_compute_type,
+                cpu_threads=settings.whisper_cpu_threads,
+                num_workers=settings.whisper_num_workers,
                 download_root=str(cache_dir),
             )
         except TypeError as exc:
@@ -209,6 +211,8 @@ def _build_faster_whisper_model(settings: WorkerSettings) -> Any:
                 settings.whisper_model_size,
                 device=settings.whisper_device,
                 compute_type=settings.whisper_compute_type,
+                cpu_threads=settings.whisper_cpu_threads,
+                num_workers=settings.whisper_num_workers,
             )
     except Exception as exc:
         raise normalize_faster_whisper_error(exc) from exc

@@ -19,6 +19,8 @@ class WorkerSettings:
     whisper_model_cache_dir: str
     hf_home: str | None
     huggingface_hub_cache: str | None
+    whisper_cpu_threads: int = 0
+    whisper_num_workers: int = 1
 
 
 def get_settings() -> WorkerSettings:
@@ -36,4 +38,6 @@ def get_settings() -> WorkerSettings:
         whisper_model_cache_dir=os.getenv("WHISPER_MODEL_CACHE_DIR", "/models/whisper"),
         hf_home=os.getenv("HF_HOME") or None,
         huggingface_hub_cache=os.getenv("HUGGINGFACE_HUB_CACHE") or None,
+        whisper_cpu_threads=int(os.getenv("WHISPER_CPU_THREADS", "0")),
+        whisper_num_workers=int(os.getenv("WHISPER_NUM_WORKERS", "1")),
     )

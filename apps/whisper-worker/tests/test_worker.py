@@ -140,10 +140,21 @@ def test_engine_factory_rejects_unknown_value(tmp_path) -> None:
 
 def test_faster_whisper_engine_converts_segments(monkeypatch, tmp_path) -> None:
     class FakeWhisperModel:
-        def __init__(self, model_size: str, device: str, compute_type: str) -> None:
+        def __init__(
+            self,
+            model_size: str,
+            device: str,
+            compute_type: str,
+            cpu_threads: int,
+            num_workers: int,
+            download_root: str,
+        ) -> None:
             self.model_size = model_size
             self.device = device
             self.compute_type = compute_type
+            self.cpu_threads = cpu_threads
+            self.num_workers = num_workers
+            self.download_root = download_root
 
         def transcribe(
             self,
@@ -198,6 +209,9 @@ def test_faster_whisper_engine_converts_segments(monkeypatch, tmp_path) -> None:
     assert result.segments[1].text == "le monde"
     assert engine._model.vad_filter is True
     assert engine._model.condition_on_previous_text is False
+    assert engine._model.cpu_threads == 0
+    assert engine._model.num_workers == 1
+    assert engine._model.download_root == str(tmp_path / "model-cache")
 
 
 def test_faster_whisper_consumes_lazy_segments_before_normalized_audio_is_deleted(monkeypatch, tmp_path) -> None:

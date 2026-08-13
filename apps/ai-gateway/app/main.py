@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
@@ -66,7 +67,7 @@ from app.schemas import (
 )
 from app.services.llm_client import FakeLlmClient, LlmClient, OllamaLlmClient
 from app.services.embedding_client import OllamaEmbeddingClient
-from app.services.ollama_client import OllamaClient, OllamaResponseError, OllamaUnavailableError
+from app.services.ollama_client import OllamaClient, OllamaRequestLimiter, OllamaResponseError, OllamaUnavailableError
 from app.database import get_db_session
 from app.models import VaultChunk, VaultDocument
 from app.vault_rag import (
@@ -100,11 +101,20 @@ if settings.cors_enabled:
     )
 
 
+@lru_cache
+def get_ollama_request_limiter(max_concurrent_requests: int) -> OllamaRequestLimiter:
+    return OllamaRequestLimiter(max_concurrent_requests)
+
+
 def get_ollama_client() -> OllamaClient:
     current_settings = get_settings()
+    request_limiter = get_ollama_request_limiter(current_settings.ollama_max_concurrent_requests)
     return OllamaClient(
         base_url=current_settings.ollama_base_url,
         timeout_seconds=current_settings.ollama_timeout_seconds,
+        num_ctx=current_settings.ollama_num_ctx,
+        keep_alive=current_settings.ollama_keep_alive,
+        request_limiter=request_limiter,
     )
 
 
@@ -119,10 +129,13 @@ def get_llm_client() -> LlmClient:
 
 def get_embedding_client() -> OllamaEmbeddingClient:
     current_settings = get_settings()
+    request_limiter = get_ollama_request_limiter(current_settings.ollama_max_concurrent_requests)
     return OllamaEmbeddingClient(
         base_url=current_settings.ollama_base_url,
         timeout_seconds=current_settings.ollama_timeout_seconds,
         model=current_settings.rag_embedding_model,
+        keep_alive=current_settings.ollama_keep_alive,
+        request_limiter=request_limiter,
     )
 
 
