@@ -2,12 +2,13 @@
 
 Private AI platform for Obsidian, designed for secure self-hosted note summarization, meeting generation, and audio transcription.
 
-This repository is intentionally bootstrapped in small steps. The current state includes:
+The current state includes:
 
-- `apps/ai-gateway`: minimal FastAPI service with `GET /v1/health`
-- `apps/obsidian-plugin`: minimal compilable Obsidian plugin in TypeScript
-- `apps/whisper-worker`: minimal Python worker process
-- `docs/`: initial architecture, security, API, deployment, and task planning docs
+- `apps/ai-gateway`: authenticated FastAPI API for notes, meetings, audio jobs, assistant actions, and vault RAG
+- `apps/obsidian-plugin`: Obsidian plugin for AI actions, recording, meeting reports, and RAG synchronization
+- `apps/whisper-worker`: local faster-whisper transcription worker
+- `infra/docker-compose.homelab.yml`: deployment target for the Kavalek homelab
+- `docs/`: architecture, security, API, and deployment documentation
 
 ## Monorepo structure
 
@@ -29,7 +30,8 @@ This repository is intentionally bootstrapped in small steps. The current state 
 - Only `ai-gateway` is intended to sit behind a reverse proxy.
 - `ollama`, `redis`, `postgres`, and workers must remain internal-only.
 - No secrets or plaintext tokens are committed.
-- This bootstrap does not yet implement authentication, quotas, or model access control.
+- API routes other than health require hashed Bearer tokens and scoped authorization.
+- Model access is restricted by an allowlist and Ollama concurrency is bounded.
 
 ## Quick start
 
@@ -79,7 +81,10 @@ The plugin MVP now supports:
 - the command `AI Meeting Assistant: Summarize current note`
 - summary note creation in the vault after a successful `POST /v1/notes/summarize` call
 
-Plugin-specific setup details are documented in [apps/obsidian-plugin/README.md](C:/Users/Antonin/projet_perso/obsidian-local-ai-platform/apps/obsidian-plugin/README.md).
+Plugin-specific setup details are documented in [apps/obsidian-plugin/README.md](apps/obsidian-plugin/README.md).
+
+The dedicated homelab target and the future Portainer/Nginx Proxy Manager procedure
+are documented in [docs/homelab-deployment.md](docs/homelab-deployment.md).
 
 ### Whisper worker
 
@@ -94,10 +99,6 @@ pytest
 
 ## Current limitations
 
-- No authentication yet
-- No database migrations yet
-- No real queue consumption yet
-- No Ollama integration yet
-- No audio transcription yet
-
-These are expected future steps and should be added incrementally.
+- schema changes are additive at application startup rather than managed by a migration framework
+- public TLS, proxy rate limiting, backups, and disaster recovery remain deployment responsibilities
+- transcription intentionally does not perform speaker diarization
