@@ -49,7 +49,7 @@ def client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("AUDIO_QUEUE_NAME", "audio_transcription_jobs")
     monkeypatch.setenv("CORS_ENABLED", "true")
     monkeypatch.setenv("CORS_ALLOW_ORIGINS", "*")
-    monkeypatch.setenv("CORS_ALLOW_METHODS", "GET,POST,OPTIONS")
+    monkeypatch.setenv("CORS_ALLOW_METHODS", "GET,POST,DELETE,OPTIONS")
     monkeypatch.setenv("CORS_ALLOW_HEADERS", "Authorization,Content-Type")
     monkeypatch.setenv("CORS_ALLOW_CREDENTIALS", "false")
     monkeypatch.setenv("RAG_ENABLED", "true")

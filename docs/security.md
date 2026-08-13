@@ -134,7 +134,7 @@ Production scripts may invoke the token CLI, but they must not write the raw tok
 - transcription files remain local to the server and are not sent to a third-party cloud service by this pipeline
 - worker logs should avoid printing full transcript bodies when they are large
 - Docker deployments should keep audio artifacts on a shared internal volume such as `audio-storage`, mounted identically in the gateway and worker
-- production transcription is STT-only by default with `DIARIZATION_ENABLED=false`; this avoids optional diarization dependencies, Hugging Face model preparation, and long-running speaker-labeling failures
+- production transcription is STT-only; speaker diarization dependencies were removed to avoid gated models, heavy GPU memory use, and long-running speaker-labeling failures
 
 ## Required future work
 

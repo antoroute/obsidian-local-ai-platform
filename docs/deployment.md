@@ -146,7 +146,7 @@ Prepare faster-whisper:
 .\scripts\prod\prepare-whisper-model.ps1 -Mode gpu -Model medium
 ```
 
-Production transcription is STT-only by default: faster-whisper runs on GPU and diarization is disabled. This avoids pyannote/Sortformer runtime failures, CUDA OOM, and long blocking steps during meeting generation.
+Production transcription is STT-only: faster-whisper handles speech-to-text without a speaker-labeling stage. This avoids extra gated models, GPU memory pressure, and long blocking steps during meeting generation.
 
 One-command bootstrap for the normal GPU path:
 
@@ -378,7 +378,6 @@ Expected GPU values:
 - `TRANSCRIPTION_ENGINE=faster_whisper`
 - `WHISPER_DEVICE=cuda`
 - `WHISPER_COMPUTE_TYPE=float16`
-- `DIARIZATION_ENABLED=false`
 - `OLLAMA_BASE_URL=http://ollama:11434`
 - `LLM_PROVIDER=ollama`
 
@@ -866,7 +865,7 @@ Configured healthchecks:
 - `AI_GATEWAY_REDIS_URL` must point to Redis on the `ai_internal` network
 - `CORS_ENABLED` controls FastAPI CORS support for Obsidian and Electron clients
 - `CORS_ALLOW_ORIGINS` should be restricted to trusted origins in production
-- `CORS_ALLOW_METHODS` should include at least `GET`, `POST`, and `OPTIONS`
+- `CORS_ALLOW_METHODS` should include `GET`, `POST`, `DELETE`, and `OPTIONS`; the plugin uses `DELETE` for RAG index cleanup
 - `CORS_ALLOW_HEADERS` should include at least `Authorization` and `Content-Type`
 - `CORS_ALLOW_CREDENTIALS` should stay `false` unless you intentionally need browser credentials
 - `AUDIO_STORAGE_DIR` controls where uploaded audio and result JSON files are stored
@@ -876,8 +875,8 @@ Configured healthchecks:
 - `MEETING_PREDIGEST_ENABLED=true` enables the controlled hybrid meeting pipeline for long transcripts
 - `MEETING_PREDIGEST_MIN_CHARS=12000` keeps short and medium meetings on a single LLM call, and uses one compact pre-digest call only beyond that threshold
 - `MEETING_DEEP_THINK_ENABLED=true` allows clients to request the optional slower `generation_mode=deep_think` pipeline
-- `MEETING_DEEP_THINK_MAX_SECTIONS=10` bounds section-by-section generation for detailed reports
-- `MEETING_DEEP_THINK_EXCERPT_CHARS_PER_SECTION=3000` bounds transcript excerpts sent to each section prompt
+- `MEETING_DEEP_THINK_MAX_SECTIONS=6` bounds section-by-section generation for detailed reports on an 8 GB GPU
+- `MEETING_DEEP_THINK_EXCERPT_CHARS_PER_SECTION=2000` bounds transcript excerpts sent to each section prompt
 - `MEETING_DEEP_THINK_FINAL_CLEANUP=true` enables deterministic cleanup of global code fences and leaked prompt labels
 - `MAX_ASSISTANT_MESSAGE_CHARS` controls the maximum assistant chat instruction size
 - `MAX_ASSISTANT_CONTEXT_CHARS` controls the maximum selected text or note context size sent to the assistant endpoint
@@ -892,7 +891,7 @@ Configured healthchecks:
 - meeting prompts are optimized for local models: direct useful output, no empty template sections, no generic filler, and action items in the simple form `Action | Owner | Due date`
 - `WHISPER_BEAM_SIZE` controls beam search width
 - `WHISPER_MODEL_CACHE_DIR`, `HF_HOME`, and `HUGGINGFACE_HUB_CACHE` should point to the persistent model cache volume in Docker
-- `DIARIZATION_ENABLED=false` is the recommended production value. The meeting pipeline currently prioritizes reliable GPU STT over speaker diarization.
+- speaker diarization is not part of the current worker; transcription stays STT-only so the production path remains predictable and lightweight
 - TLS certificate management for public Internet exposure is a later step; Traefik is already positioned as the only public entrypoint
 
 ## Recommended worker settings
@@ -972,7 +971,7 @@ Recommended defaults for local development:
 
 - `CORS_ENABLED=true`
 - `CORS_ALLOW_ORIGINS=*`
-- `CORS_ALLOW_METHODS=GET,POST,OPTIONS`
+- `CORS_ALLOW_METHODS=GET,POST,DELETE,OPTIONS`
 - `CORS_ALLOW_HEADERS=Authorization,Content-Type`
 - `CORS_ALLOW_CREDENTIALS=false`
 

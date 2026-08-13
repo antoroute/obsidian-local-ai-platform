@@ -8,8 +8,8 @@ services:
     environment:
       LLM_PROVIDER: ollama
       OLLAMA_BASE_URL: http://ollama:11434
-      DEFAULT_MODEL: ${DEFAULT_MODEL:-qwen2.5:7b}
-      ALLOWED_MODELS: ${ALLOWED_MODELS:-qwen2.5:7b,mistral:latest,qwen2.5:14b,llama3:latest}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-qwen3:8b}
+      ALLOWED_MODELS: ${ALLOWED_MODELS:-qwen3:8b}
     ports:
       - "${GATEWAY_BIND_ADDRESS:-127.0.0.1}:${GATEWAY_BIND_PORT:-8000}:8000"
 

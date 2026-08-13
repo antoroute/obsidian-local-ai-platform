@@ -56,6 +56,21 @@ def test_audio_transcribe_preflight_options_returns_cors_headers(client: TestCli
     assert "POST" in response.headers["access-control-allow-methods"]
 
 
+def test_vault_delete_preflight_is_allowed_for_obsidian(client: TestClient) -> None:
+    response = client.options(
+        "/v1/vault/index",
+        headers={
+            "Origin": "app://obsidian.md",
+            "Access-Control-Request-Method": "DELETE",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+
+    assert response.status_code in {200, 204}
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert "DELETE" in response.headers["access-control-allow-methods"]
+
+
 def test_audio_transcribe_rejects_missing_scope(client: TestClient) -> None:
     token = create_token(["notes:summarize"])
     response = upload_audio(client, token)
