@@ -1,0 +1,12 @@
+services:
+  ai-gateway:
+    image: ${GATEWAY_IMAGE:-obsidian-ai-gateway:local}
+    pull_policy: never
+
+  whisper-worker:
+    image: ${WHISPER_WORKER_IMAGE:-obsidian-ai-whisper-worker:local}
+    pull_policy: never
+
+  whisper-model-preparer:
+    image: ${WHISPER_WORKER_IMAGE:-obsidian-ai-whisper-worker:local}
+    pull_policy: never

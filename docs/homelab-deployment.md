@@ -67,6 +67,11 @@ Le dépôt étant privé, Portainer aura besoin de deux accès distincts :
 Le token de développement utilisé pour pousser le code ne doit pas être réutilisé
 comme secret permanent de Portainer.
 
+Pour un bootstrap sans identifiant GHCR permanent, construire les images localement
+et ajouter [infra/docker-compose.homelab.local-images.yml](../infra/docker-compose.homelab.local-images.yml)
+à toutes les commandes Compose. Cet override interdit explicitement les pulls ; il
+ne doit être retiré qu'après configuration du registre GHCR en lecture seule.
+
 ## Variables Portainer
 
 Copier les clés de [`.env.homelab.example`](../.env.homelab.example) dans
