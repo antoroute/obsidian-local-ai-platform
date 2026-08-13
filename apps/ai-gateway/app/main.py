@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.audio import sanitize_original_filename, save_uploaded_audio, validate_transcription_language
 from app.assistant import prepare_assistant_request
-from app.auth import get_current_token, require_scope
+from app.auth import get_current_token, require_scope, require_scope_with_quotas
 from app.config import get_settings
 from app.database import init_db
 from app.models import ApiToken
@@ -17,6 +17,7 @@ from app.token_repository import token_has_scope
 from app.jobs import (
     JOB_STATUS_COMPLETED,
     create_audio_transcription_job,
+    ensure_audio_job_capacity,
     read_transcript_result,
     require_job_for_user,
 )
@@ -155,7 +156,7 @@ def list_models(
 @app.post("/v1/notes/summarize", tags=["notes"], response_model=NoteSummarizeResponse)
 async def summarize_note(
     payload: NoteSummarizeRequest,
-    token: Annotated[ApiToken, Depends(require_scope("notes:summarize"))],
+    token: Annotated[ApiToken, Depends(require_scope_with_quotas("notes:summarize", "llm"))],
     llm_client: Annotated[LlmClient, Depends(get_llm_client)],
 ) -> NoteSummarizeResponse:
     del token
@@ -195,7 +196,7 @@ async def summarize_note(
 @app.post("/v1/assistant/chat", tags=["assistant"], response_model=AssistantChatResponse)
 async def assistant_chat(
     payload: AssistantChatRequest,
-    token: Annotated[ApiToken, Depends(require_scope("assistant:chat"))],
+    token: Annotated[ApiToken, Depends(require_scope_with_quotas("assistant:chat", "llm"))],
     llm_client: Annotated[LlmClient, Depends(get_llm_client)],
 ) -> AssistantChatResponse:
     del token
@@ -328,7 +329,7 @@ def resolve_prepared_output_language(prepared_request: PreparedMeetingRequest) -
 @app.post("/v1/meetings/generate", tags=["meetings"], response_model=MeetingGenerateResponse)
 async def generate_meeting_report(
     payload: MeetingGenerateRequest,
-    token: Annotated[ApiToken, Depends(require_scope("meetings:generate"))],
+    token: Annotated[ApiToken, Depends(require_scope_with_quotas("meetings:generate", "llm"))],
     llm_client: Annotated[LlmClient, Depends(get_llm_client)],
 ) -> MeetingGenerateResponse:
     del token
@@ -366,7 +367,7 @@ async def generate_meeting_report(
 @app.post("/v1/meetings/generate-from-job", tags=["meetings"], response_model=MeetingGenerateFromJobResponse)
 async def generate_meeting_report_from_job(
     payload: MeetingGenerateFromJobRequest,
-    token: Annotated[ApiToken, Depends(require_scope("meetings:generate"))],
+    token: Annotated[ApiToken, Depends(require_scope_with_quotas("meetings:generate", "llm"))],
     session: Annotated[Session, Depends(get_db_session)],
     llm_client: Annotated[LlmClient, Depends(get_llm_client)],
 ) -> MeetingGenerateFromJobResponse:
@@ -423,7 +424,7 @@ async def generate_meeting_report_from_job(
 @app.post("/v1/vault/index-note", tags=["vault"], response_model=VaultIndexNoteResponse)
 async def vault_index_note(
     payload: VaultIndexNoteRequest,
-    token: Annotated[ApiToken, Depends(require_scope("vault:index"))],
+    token: Annotated[ApiToken, Depends(require_scope_with_quotas("vault:index", "embedding"))],
     session: Annotated[Session, Depends(get_db_session)],
     embedding_client: Annotated[OllamaEmbeddingClient, Depends(get_embedding_client)],
 ) -> VaultIndexNoteResponse:
@@ -455,7 +456,7 @@ async def vault_index_note(
 @app.post("/v1/vault/search", tags=["vault"], response_model=VaultSearchResponse)
 async def vault_search(
     payload: VaultSearchRequest,
-    token: Annotated[ApiToken, Depends(require_scope("vault:search"))],
+    token: Annotated[ApiToken, Depends(require_scope_with_quotas("vault:search", "embedding"))],
     session: Annotated[Session, Depends(get_db_session)],
     embedding_client: Annotated[OllamaEmbeddingClient, Depends(get_embedding_client)],
 ) -> VaultSearchResponse:
@@ -497,7 +498,7 @@ async def vault_search(
 @app.post("/v1/vault/ask", tags=["vault"], response_model=VaultAskResponse)
 async def vault_ask(
     payload: VaultAskRequest,
-    token: Annotated[ApiToken, Depends(require_scope("vault:ask"))],
+    token: Annotated[ApiToken, Depends(require_scope_with_quotas("vault:ask", "embedding", "llm"))],
     session: Annotated[Session, Depends(get_db_session)],
     embedding_client: Annotated[OllamaEmbeddingClient, Depends(get_embedding_client)],
     llm_client: Annotated[LlmClient, Depends(get_llm_client)],
@@ -658,12 +659,17 @@ async def _embed_text(embedding_client: OllamaEmbeddingClient, text: str) -> lis
 @app.post("/v1/audio/transcribe", tags=["audio"], response_model=AudioTranscriptionQueuedResponse)
 async def transcribe_audio(
     file: Annotated[UploadFile, File(...)],
-    token: Annotated[ApiToken, Depends(require_scope("audio:transcribe"))],
+    token: Annotated[ApiToken, Depends(require_scope_with_quotas("audio:transcribe", "audio"))],
     session: Annotated[Session, Depends(get_db_session)],
     queue: Annotated[AudioJobQueue, Depends(get_audio_job_queue)],
     transcription_language: Annotated[str, Form()] = "auto",
 ) -> AudioTranscriptionQueuedResponse:
     settings = get_settings()
+    ensure_audio_job_capacity(
+        session,
+        user_id=token.user_id,
+        max_active_jobs=settings.max_active_audio_jobs_per_user,
+    )
     requested_language = validate_transcription_language(transcription_language)
     input_path = await save_uploaded_audio(file, settings)
     job = create_audio_transcription_job(

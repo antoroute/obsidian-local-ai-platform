@@ -6,6 +6,9 @@ from fastapi.testclient import TestClient
 from app.database import get_session_factory
 from app.jobs import JOB_STATUS_COMPLETED, JOB_STATUS_QUEUED
 from app.models import Job
+from app.config import get_settings
+from app.main import app
+from app.quota import QuotaUsage, UsageQuotaLimiter, get_usage_quota_limiter
 from app.token_repository import create_api_token
 
 
@@ -95,6 +98,41 @@ def test_audio_transcribe_queues_job(client: TestClient) -> None:
     assert payload["job_id"]
     assert client.fake_audio_queue.job_ids == [payload["job_id"]]
     assert client.fake_audio_queue.messages[0]["transcription_language"] == "auto"
+
+
+def test_audio_transcribe_rejects_second_active_job(client: TestClient) -> None:
+    token = create_token(["audio:transcribe"], user_id="single-job-user")
+
+    first = upload_audio(client, token, filename="first.mp3")
+    second = upload_audio(client, token, filename="second.mp3")
+
+    assert first.status_code in {200, 202}
+    assert second.status_code == 429
+    assert second.json() == {"detail": "Too many active audio transcription jobs."}
+    assert second.headers["retry-after"] == "30"
+
+
+class ExceededAudioQuota(UsageQuotaLimiter):
+    def consume(self, *, user_id: str, bucket: str, limit: int) -> QuotaUsage:
+        del user_id, bucket, limit
+        return QuotaUsage(count=2, limit=1, retry_after_seconds=60)
+
+
+def test_audio_transcribe_enforces_daily_user_quota(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    token = create_token(["audio:transcribe"], user_id="quota-user")
+    monkeypatch.setenv("USAGE_QUOTAS_ENABLED", "true")
+    monkeypatch.setenv("DAILY_AUDIO_JOBS_PER_USER", "1")
+    get_settings.cache_clear()
+    app.dependency_overrides[get_usage_quota_limiter] = lambda: ExceededAudioQuota()
+
+    response = upload_audio(client, token)
+
+    assert response.status_code == 429
+    assert response.json() == {"detail": "Daily audio quota exceeded."}
+    assert response.headers["retry-after"] == "60"
 
 
 def test_audio_transcribe_neutralizes_path_traversal_filename(client: TestClient) -> None:

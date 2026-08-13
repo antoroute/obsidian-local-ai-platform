@@ -32,6 +32,7 @@ The current state includes:
 - No secrets or plaintext tokens are committed.
 - API routes other than health require hashed Bearer tokens and scoped authorization.
 - Model access is restricted by an allowlist and Ollama concurrency is bounded.
+- Redis-backed daily per-user quotas and active audio-job limits protect local compute.
 
 ## Quick start
 

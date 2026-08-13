@@ -136,13 +136,19 @@ Production scripts may invoke the token CLI, but they must not write the raw tok
 - Docker deployments should keep audio artifacts on a shared internal volume such as `audio-storage`, mounted identically in the gateway and worker
 - production transcription is STT-only; speaker diarization dependencies were removed to avoid gated models, heavy GPU memory use, and long-running speaker-labeling failures
 
+## Usage and concurrency safeguards
+
+- Redis enforces separate daily per-user quotas for LLM, embedding, and audio requests
+- quota keys contain a truncated hash of the user ID rather than the raw identifier
+- exhausted quotas return `429` with a `Retry-After` header and reset at midnight UTC
+- `MAX_ACTIVE_AUDIO_JOBS_PER_USER` bounds queued plus processing audio jobs before an upload is saved
+- `OLLAMA_MAX_CONCURRENT_REQUESTS` bounds all gateway LLM and embedding calls; the homelab value is `1`
+- the homelab defaults are 100 LLM requests, 5,000 embedding requests, and 20 audio jobs per user and UTC day
+- Redis failures make quota-protected routes fail closed with `503`
+
 ## Required future work
 
-- Per-user authorization and quotas
-- Job concurrency controls
 - Structured audit logging
-- Reverse proxy TLS configuration
-- Authentication and authorization test coverage
 
 ## Operational guidance
 

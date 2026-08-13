@@ -47,6 +47,7 @@ def client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("AUDIO_STORAGE_DIR", str(audio_dir))
     monkeypatch.setenv("MAX_AUDIO_UPLOAD_MB", "1")
     monkeypatch.setenv("AUDIO_QUEUE_NAME", "audio_transcription_jobs")
+    monkeypatch.setenv("USAGE_QUOTAS_ENABLED", "false")
     monkeypatch.setenv("CORS_ENABLED", "true")
     monkeypatch.setenv("CORS_ALLOW_ORIGINS", "*")
     monkeypatch.setenv("CORS_ALLOW_METHODS", "GET,POST,DELETE,OPTIONS")

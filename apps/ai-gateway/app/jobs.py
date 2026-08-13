@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Job
@@ -66,6 +66,27 @@ def create_audio_transcription_job(
     session.commit()
     session.refresh(job)
     return job
+
+
+def ensure_audio_job_capacity(session: Session, *, user_id: str, max_active_jobs: int) -> None:
+    active_jobs = int(
+        session.scalar(
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.user_id == user_id,
+                Job.type == JOB_TYPE_AUDIO_TRANSCRIPTION,
+                Job.status.in_([JOB_STATUS_QUEUED, JOB_STATUS_PROCESSING]),
+            )
+        )
+        or 0
+    )
+    if active_jobs >= max_active_jobs:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many active audio transcription jobs.",
+            headers={"Retry-After": "30"},
+        )
 
 
 def get_job_for_user(session: Session, *, job_id: str, user_id: str) -> Job | None:

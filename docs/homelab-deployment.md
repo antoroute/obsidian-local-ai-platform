@@ -87,6 +87,11 @@ Ne jamais committer le fichier réel. Avant le déploiement, vérifier notamment
 - `RAG_EMBEDDING_MODEL=qwen3-embedding:0.6b` ;
 - `RAG_EMBEDDING_DIMENSION=1024` ;
 - `OLLAMA_MAX_CONCURRENT_REQUESTS=1` ;
+- `USAGE_QUOTAS_ENABLED=true` ;
+- `DAILY_LLM_REQUESTS_PER_USER=100` ;
+- `DAILY_EMBEDDING_REQUESTS_PER_USER=5000` ;
+- `DAILY_AUDIO_JOBS_PER_USER=20` ;
+- `MAX_ACTIVE_AUDIO_JOBS_PER_USER=1` ;
 - `WHISPER_MODEL_SIZE=small`.
 
 ## Préparation initiale du modèle Whisper
@@ -129,25 +134,32 @@ du proxy host devra contenir au minimum :
 client_max_body_size 260m;
 proxy_read_timeout 3600s;
 proxy_send_timeout 3600s;
+limit_req zone=obsidian_ai_api burst=60 nodelay;
+limit_req_status 429;
+limit_conn obsidian_ai_conn 4;
+limit_conn_status 429;
 ```
 
 La valeur reste légèrement supérieure à `MAX_AUDIO_UPLOAD_MB=250`, afin que
 l'application conserve la décision finale d'accepter ou de refuser le fichier.
+Les zones Nginx correspondantes utilisent `120r/m` par adresse IP et quatre
+connexions simultanées. Les quotas applicatifs par utilisateur restent la seconde
+barrière et protègent les appareils partageant une même adresse publique.
 
-Pendant la phase 3, il faudra également restreindre le port `18000` au reverse proxy,
-activer la limitation de débit côté proxy, vérifier les en-têtes TLS et tester que
-les routes protégées renvoient bien `401` sans token.
+Le port `18000` est filtré dans `DOCKER-USER` : seuls NPM `10.0.10.20` et l'hôte
+Docker lui-même sont autorisés. Le proxy host NPM 84, HSTS, le DNS public OVH et le
+retour `401` sans token ont été validés le 13 août 2026.
 
-## Ordre de la phase 3
+## Phase 3 appliquée
 
-1. intégrer la branche validée dans `main` et attendre la publication GHCR ;
-2. créer les identifiants Git et GHCR à privilèges minimaux dans Portainer ;
-3. préparer le volume Whisper ;
-4. déployer la stack sans exposition DNS publique et lancer les diagnostics internes ;
-5. créer un token applicatif dédié au plugin et le conserver uniquement dans Obsidian ;
-6. configurer Nginx Proxy Manager et le DNS ;
-7. tester TLS, authentification, limites d'upload, RAG, transcription et génération ;
-8. configurer sauvegardes et procédure de retour arrière avant d'activer GitOps.
+Le déploiement réel utilise l'Ollama existant sur `10.0.70.10`, PostgreSQL/pgvector
+et Redis internes, Whisper `small` CPU/int8 avec un seul worker, et le seul port
+publié `10.0.20.20:18000`. Les tests fonctionnels couvrent authentification,
+résumé, assistant, réunions, RAG et transcription audio réelle.
+
+GHCR reste privé. Tant qu'un jeton classique dédié `read:packages` n'est pas ajouté
+à Portainer, le serveur utilise l'override d'images locales avec
+`pull_policy: never`. Cette limite n'affecte pas l'exécution courante.
 
 ## Retour arrière et données
 
