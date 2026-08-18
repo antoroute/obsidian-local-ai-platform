@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 gpu = [
   "huggingface-hub<=0.23.5",
+  "matplotlib>=3.8,<4.0",
   "pyannote.audio==3.3.2",
 ]
 dev = ["pytest>=8,<9"]
