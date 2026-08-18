@@ -140,6 +140,7 @@ services:
         condition: service_healthy
     networks:
       - ai_backend
+      - ollama_egress
     volumes:
       - audio-storage:/data/audio
       - whisper-model-cache:/models/whisper
