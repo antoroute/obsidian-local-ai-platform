@@ -22,5 +22,5 @@ COPY pyproject.toml ./
 COPY diarization_service ./diarization_service
 RUN pip install '.[gpu]'
 
-EXPOSE 18080
-CMD ["uvicorn", "diarization_service.main:app", "--host", "0.0.0.0", "--port", "18080"]
+EXPOSE 11434
+CMD ["uvicorn", "diarization_service.main:app", "--host", "0.0.0.0", "--port", "11434"]

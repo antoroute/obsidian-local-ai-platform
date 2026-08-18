@@ -38,3 +38,11 @@ def test_ollama_health_checks_the_real_api(monkeypatch) -> None:
 
     assert main.ollama_health()["status"] == "ok"
     assert called_urls == [f"{main.settings.ollama_base_url}/api/version"]
+
+
+def test_transparent_ollama_routes_are_registered_after_service_routes() -> None:
+    paths = [route.path for route in main.app.routes]
+
+    assert paths.index("/v1/health") < paths.index("/v1/{upstream_path:path}")
+    assert "/api/{upstream_path:path}" in paths
+    assert "/ollama/{upstream_path:path}" in paths

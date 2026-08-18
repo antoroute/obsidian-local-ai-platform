@@ -12,8 +12,8 @@ flowchart LR
     N -->|HTTP, réseau interne| G[AI gateway<br/>10.0.20.20:18000]
     G --> P[(PostgreSQL + pgvector)]
     G --> R[(Redis)]
-    G -->|requêtes sérialisées| C[Coordinateur GPU<br/>10.0.70.10:18080]
-    C -->|verrou GPU| L[Ollama existant<br/>10.0.70.10:11434<br/>RTX 2070 8 Go]
+    G -->|requêtes sérialisées| C[Coordinateur GPU<br/>10.0.70.10:11434]
+    C -->|verrou GPU| L[Ollama natif<br/>127.0.0.1:11435<br/>RTX 2070 8 Go]
     R --> W[Whisper worker<br/>CPU, small/int8]
     W --> P
     W -->|audio, opt-in + Bearer privé| C
@@ -90,7 +90,7 @@ chiffres, `_` et `-`, puisqu'il est injecté dans l'URL SQLAlchemy.
 Ne jamais committer le fichier réel. Avant le déploiement, vérifier notamment :
 
 - `GATEWAY_BIND_ADDRESS=10.0.20.20` ;
-- `OLLAMA_BASE_URL=http://10.0.70.10:18080/ollama` ;
+- `OLLAMA_BASE_URL=http://10.0.70.10:11434` ;
 - `DEFAULT_MODEL` et `ALLOWED_MODELS` limités à `qwen3:8b` ;
 - `RAG_EMBEDDING_MODEL=qwen3-embedding:0.6b` ;
 - `RAG_EMBEDDING_DIMENSION=1024` ;
@@ -107,13 +107,12 @@ Ne jamais committer le fichier réel. Avant le déploiement, vérifier notamment
 
 ## Coordinateur GPU et diarisation
 
-La VM `10.0.70.10` exécute Ollama nativement et le coordinateur dans Docker avec
-`network_mode: host`. Le pare-feu doit autoriser TCP/18080 uniquement depuis le LXC
-Docker, VM112, VM121 et les hôtes de supervision explicitement nécessaires. Tous
-les consommateurs utilisent `http://10.0.70.10:18080/ollama`; les accès entrants
-directs à TCP/11434 sont ensuite supprimés. Ainsi, le verrou couvre aussi Open
-WebUI et Hermes, pas seulement Obsidian AI. Aucun de ces deux ports ne doit être
-exposé publiquement.
+La VM `10.0.70.10` exécute Ollama nativement sur `127.0.0.1:11435` et le
+coordinateur dans Docker avec `network_mode: host` sur `10.0.70.10:11434`. Tous les
+consommateurs conservent l'URL historique : le proxy transparent couvre donc Open
+WebUI et Hermes sans ouvrir un nouveau flux OPNsense. Seul le coordinateur peut
+joindre le port loopback d'Ollama. TCP/11434 reste limité par les pare-feux
+existants et ne doit jamais être publié sur Internet.
 
 Le modèle par défaut reste `pyannote/speaker-diarization-3.1`. Il est plus prudent
 sur une RTX 2070 8 Go que Community-1 avec les versions actuelles de pyannote. Son

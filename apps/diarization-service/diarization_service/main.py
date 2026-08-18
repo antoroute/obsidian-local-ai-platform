@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     service_token: str = ""
     model: str = "pyannote/speaker-diarization-3.1"
     hf_token: str = ""
-    ollama_base_url: str = "http://10.0.70.10:11434"
+    ollama_base_url: str = "http://127.0.0.1:11435"
     model_cache_dir: str = "/models/pyannote"
     max_upload_mb: int = 500
     ollama_timeout_seconds: int = 30
@@ -120,6 +120,8 @@ async def diarize(
 
 
 @app.api_route("/ollama/{upstream_path:path}", methods=["GET", "POST", "DELETE"])
+@app.api_route("/api/{upstream_path:path}", methods=["GET", "POST", "DELETE"])
+@app.api_route("/v1/{upstream_path:path}", methods=["GET", "POST", "DELETE"])
 async def proxy_ollama(upstream_path: str, request: Request) -> Response:
     # All Ollama traffic goes through the same lock. A diarization therefore
     # cannot race a model reload on the 8 GB GPU.
@@ -130,9 +132,12 @@ async def proxy_ollama(upstream_path: str, request: Request) -> Response:
             base_url=settings.ollama_base_url.rstrip("/"),
             timeout=None,
         ) as client:
+            upstream_path_with_prefix = request.url.path
+            if upstream_path_with_prefix.startswith("/ollama/"):
+                upstream_path_with_prefix = upstream_path_with_prefix.removeprefix("/ollama")
             upstream = await client.request(
                 request.method,
-                f"/{upstream_path}",
+                upstream_path_with_prefix,
                 params=request.query_params,
                 content=body,
                 headers=headers,
