@@ -28,8 +28,11 @@ def upload_audio(
     filename: str = "sample.mp3",
     content: bytes = b"audio",
     transcription_language: str | None = None,
+    diarization_enabled: bool | None = None,
 ) -> object:
     data = {} if transcription_language is None else {"transcription_language": transcription_language}
+    if diarization_enabled is not None:
+        data["diarization_enabled"] = "true" if diarization_enabled else "false"
     return client.post(
         "/v1/audio/transcribe",
         headers=create_bearer_header(token),
@@ -196,6 +199,19 @@ def test_audio_transcribe_rejects_invalid_transcription_language(client: TestCli
     assert response.status_code == 422
 
 
+def test_audio_transcribe_stores_optional_diarization_request(client: TestClient) -> None:
+    token = create_token(["audio:transcribe"])
+
+    response = upload_audio(client, token, diarization_enabled=True)
+
+    assert response.status_code in {200, 202}
+    with get_session_factory()() as session:
+        job = session.get(Job, response.json()["job_id"])
+        assert job is not None
+        metadata = json.loads(job.metadata_json or "{}")
+        assert metadata["diarization_enabled"] is True
+
+
 def test_audio_transcribe_rejects_too_large_file(client: TestClient) -> None:
     token = create_token(["audio:transcribe"])
     too_big = b"a" * (1024 * 1024 + 1)
@@ -213,6 +229,82 @@ def test_get_job_returns_owner_job(client: TestClient) -> None:
 
     assert status_response.status_code == 200
     assert status_response.json()["status"] == "queued"
+    assert status_response.json()["phase"] == "queued"
+    assert status_response.json()["progress"] == 0
+
+
+def test_list_jobs_returns_only_current_user_history(client: TestClient) -> None:
+    owner_token = create_token(["audio:transcribe"], user_id="owner")
+    other_token = create_token(["audio:transcribe"], user_id="other")
+    upload_audio(client, owner_token)
+    upload_audio(client, other_token)
+
+    response = client.get("/v1/jobs", headers=create_bearer_header(owner_token))
+
+    assert response.status_code == 200
+    assert len(response.json()["jobs"]) == 1
+    assert response.json()["jobs"][0]["status"] == "queued"
+
+
+def test_cancel_queued_job_is_idempotent(client: TestClient) -> None:
+    token = create_token(["audio:transcribe"], user_id="user-1")
+    upload_response = upload_audio(client, token)
+    job_id = upload_response.json()["job_id"]
+
+    first = client.post(f"/v1/jobs/{job_id}/cancel", headers=create_bearer_header(token))
+    second = client.post(f"/v1/jobs/{job_id}/cancel", headers=create_bearer_header(token))
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "cancelled"
+    assert first.json()["cancel_requested"] is True
+    assert second.status_code == 200
+    assert second.json()["status"] == "cancelled"
+
+
+def test_other_user_cannot_cancel_job(client: TestClient) -> None:
+    owner_token = create_token(["audio:transcribe"], user_id="owner")
+    other_token = create_token(["audio:transcribe"], user_id="other")
+    upload_response = upload_audio(client, owner_token)
+    job_id = upload_response.json()["job_id"]
+
+    response = client.post(f"/v1/jobs/{job_id}/cancel", headers=create_bearer_header(other_token))
+
+    assert response.status_code == 404
+
+
+def test_readiness_reports_independent_runtime_components(client: TestClient, monkeypatch) -> None:
+    token = create_token(["models:list"])
+    monkeypatch.setattr(
+        "app.main.check_runtime_components",
+        lambda session: ({"gateway": True, "database": True, "redis": True, "worker": False, "ollama": True}, 0),
+    )
+
+    unauthorized = client.get("/v1/health/ready")
+    response = client.get("/v1/health/ready", headers=create_bearer_header(token))
+
+    assert unauthorized.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["components"]["worker"]["status"] == "down"
+    assert response.json()["components"]["ollama"]["status"] == "up"
+
+
+def test_metrics_requires_dedicated_token_and_exposes_worker_state(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("METRICS_TOKEN", "metrics-test-token")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.main.check_runtime_components",
+        lambda session: ({"gateway": True, "database": True, "redis": True, "worker": True, "ollama": False}, 2),
+    )
+
+    unauthorized = client.get("/metrics")
+    response = client.get("/metrics", headers={"Authorization": "Bearer metrics-test-token"})
+
+    assert unauthorized.status_code == 401
+    assert response.status_code == 200
+    assert 'obsidian_ai_component_up{component="worker"} 1' in response.text
+    assert 'obsidian_ai_component_up{component="ollama"} 0' in response.text
+    assert "obsidian_ai_audio_queue_depth 2" in response.text
 
 
 def test_get_job_result_before_completion_returns_conflict(client: TestClient) -> None:

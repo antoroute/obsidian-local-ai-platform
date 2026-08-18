@@ -42,8 +42,6 @@ def init_db() -> None:
     engine = get_engine()
     ensure_pgvector_extension(engine)
     Base.metadata.create_all(bind=engine)
-    ensure_job_metadata_column(engine)
-    ensure_vault_workspace_columns(engine)
     ensure_pgvector_support(engine)
 
 

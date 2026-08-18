@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+import threading
 import time
 
 from whisper_worker.config import get_settings
-from whisper_worker.database import Base, create_engine_for_settings, create_session_factory, ensure_job_metadata_column
+from whisper_worker.database import Base, create_engine_for_settings, create_session_factory
+from whisper_worker.diarization_client import DiarizationClient
 from whisper_worker.engines import check_engine, create_engine, prepare_model
 from whisper_worker.processor import process_audio_job
 from whisper_worker.queue_backend import RedisQueueBackend
-from whisper_worker.repositories import mark_processing_jobs_failed
+from whisper_worker.repositories import recover_processing_jobs
 
 
 def configure_logging() -> None:
@@ -36,30 +38,67 @@ def build_parser() -> argparse.ArgumentParser:
 def run_worker_loop() -> None:
     settings = get_settings()
     engine = create_engine(settings)
+    diarization_client = DiarizationClient(
+        base_url=settings.diarization_service_url,
+        token=settings.diarization_service_token,
+        timeout_seconds=settings.diarization_timeout_seconds,
+    )
     db_engine = create_engine_for_settings(settings)
     Base.metadata.create_all(db_engine)
-    ensure_job_metadata_column(db_engine)
     session_factory = create_session_factory(db_engine)
     queue = RedisQueueBackend(settings.redis_url, settings.queue_name)
     logger = logging.getLogger("whisper_worker")
 
     with session_factory() as session:
-        stale_jobs = mark_processing_jobs_failed(
+        recovered_job_ids = recover_processing_jobs(
             session,
-            "Worker was restarted while transcription was still processing. Retry the audio transcription.",
-            _utc_now(),
+            max_attempts=settings.job_max_attempts,
+            now=_utc_now(),
         )
-        if stale_jobs:
-            logger.warning("Marked %s stale processing audio job(s) as failed after worker startup.", stale_jobs)
+        for job_id in recovered_job_ids:
+            queue.push_audio_job(job_id)
+        if recovered_job_ids:
+            logger.warning("Requeued %s interrupted audio job(s) after worker startup.", len(recovered_job_ids))
 
     logger.info("Worker started with engine=%s queue=%s", settings.transcription_engine, settings.queue_name)
 
-    while True:
-        message = queue.pop_audio_job(timeout_seconds=1)
-        if message is None:
-            time.sleep(0.1)
-            continue
-        process_audio_job(session_factory, engine, message.job_id)
+    heartbeat_stop = threading.Event()
+
+    def maintain_worker_heartbeat() -> None:
+        interval_seconds = max(1, settings.worker_heartbeat_ttl_seconds // 3)
+        while not heartbeat_stop.is_set():
+            try:
+                queue.touch_worker_heartbeat(
+                    settings.worker_heartbeat_key,
+                    ttl_seconds=settings.worker_heartbeat_ttl_seconds,
+                    value=_utc_now().isoformat(),
+                )
+            except Exception as exc:
+                logger.warning("Could not refresh the worker heartbeat: %s", exc)
+            heartbeat_stop.wait(interval_seconds)
+
+    heartbeat_thread = threading.Thread(
+        target=maintain_worker_heartbeat,
+        name="worker-heartbeat",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        while True:
+            message = queue.pop_audio_job(timeout_seconds=1)
+            if message is None:
+                time.sleep(0.1)
+                continue
+            process_audio_job(
+                session_factory,
+                engine,
+                message.job_id,
+                progress_min_interval_seconds=settings.job_progress_min_interval_seconds,
+                diarization_client=diarization_client if diarization_client.configured else None,
+            )
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2)
 
 
 def _utc_now():

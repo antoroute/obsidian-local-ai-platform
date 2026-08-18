@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from app.database import get_session_factory
@@ -7,6 +9,7 @@ from app.main import app, get_embedding_client, get_llm_client
 from app.models import VaultChunk, VaultDocument
 from app.services.ollama_client import OllamaChatResult, OllamaUnavailableError
 from app.token_repository import create_api_token
+from app.vault_rag import SearchHit, select_diverse_hits
 
 
 class FakeEmbeddingClient:
@@ -71,6 +74,26 @@ def index_payload(content: str = "# RAG\n\nDecision CouchDB: ne pas lire CouchDB
         "frontmatter": {"type": "note"},
         "metadata": {},
     }
+
+
+def test_search_hit_selection_prioritizes_distinct_documents_and_removes_duplicates() -> None:
+    document_a = SimpleNamespace(id="doc-a", path="A.md")
+    document_b = SimpleNamespace(id="doc-b", path="B.md")
+    chunk_a1 = SimpleNamespace(id="a-1")
+    chunk_a2 = SimpleNamespace(id="a-2")
+    chunk_a3 = SimpleNamespace(id="a-3")
+    chunk_b1 = SimpleNamespace(id="b-1")
+    hits = [
+        SearchHit(chunk=chunk_a1, document=document_a, score=0.99),
+        SearchHit(chunk=chunk_a1, document=document_a, score=0.99),
+        SearchHit(chunk=chunk_a2, document=document_a, score=0.98),
+        SearchHit(chunk=chunk_a3, document=document_a, score=0.97),
+        SearchHit(chunk=chunk_b1, document=document_b, score=0.80),
+    ]
+
+    selected = select_diverse_hits(hits, top_k=3, max_per_document=2)
+
+    assert [hit.chunk.id for hit in selected] == ["a-1", "a-2", "b-1"]
 
 
 def test_index_note_requires_vault_index_scope(client: TestClient) -> None:

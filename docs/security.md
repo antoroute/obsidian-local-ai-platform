@@ -134,7 +134,10 @@ Production scripts may invoke the token CLI, but they must not write the raw tok
 - transcription files remain local to the server and are not sent to a third-party cloud service by this pipeline
 - worker logs should avoid printing full transcript bodies when they are large
 - Docker deployments should keep audio artifacts on a shared internal volume such as `audio-storage`, mounted identically in the gateway and worker
-- production transcription is STT-only; speaker diarization dependencies were removed to avoid gated models, heavy GPU memory use, and long-running speaker-labeling failures
+- speaker diarization is opt-in and isolated on the GPU VM; it uses an independent Bearer secret and remains disabled by default
+- the GPU coordinator port is private and restricted by firewall to the worker/gateway and monitoring hosts
+- diarization labels anonymous turns only and must never be presented as biometric identity
+- `/metrics` requires a dedicated monitoring token and exposes no note, prompt, audio, or transcript content
 
 ## Usage and concurrency safeguards
 

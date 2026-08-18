@@ -9,14 +9,25 @@ from whisper_worker.database import Base, create_engine_for_settings, create_ses
 from whisper_worker.engines import (
     FakeTranscriptionEngine,
     FasterWhisperEngine,
+    TranscriptionCancelled,
     check_engine,
     create_engine,
     normalize_faster_whisper_error,
 )
+from whisper_worker.diarization_client import SpeakerTurn, apply_speaker_turns
 from whisper_worker.models import Job
 from whisper_worker.processor import process_audio_job
 from whisper_worker.processor import validate_transcript_has_speech
-from whisper_worker.repositories import JOB_STATUS_COMPLETED, JOB_STATUS_FAILED
+from whisper_worker.repositories import (
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PROCESSING,
+    recover_processing_jobs,
+    TranscriptResult,
+    TranscriptSegment,
+    TranscriptWord,
+)
 from whisper_worker.config import WorkerSettings
 
 
@@ -163,11 +174,13 @@ def test_faster_whisper_engine_converts_segments(monkeypatch, tmp_path) -> None:
             beam_size: int,
             vad_filter: bool,
             condition_on_previous_text: bool,
+            word_timestamps: bool,
         ):
             del input_path
             self.language = language
             self.vad_filter = vad_filter
             self.condition_on_previous_text = condition_on_previous_text
+            self.word_timestamps = word_timestamps
             segments = [
                 SimpleNamespace(start=0.0, end=1.0, text=" Bonjour"),
                 SimpleNamespace(start=1.0, end=2.5, text=" le monde "),
@@ -209,6 +222,7 @@ def test_faster_whisper_engine_converts_segments(monkeypatch, tmp_path) -> None:
     assert result.segments[1].text == "le monde"
     assert engine._model.vad_filter is True
     assert engine._model.condition_on_previous_text is False
+    assert engine._model.word_timestamps is True
     assert engine._model.cpu_threads == 0
     assert engine._model.num_workers == 1
     assert engine._model.download_root == str(tmp_path / "model-cache")
@@ -324,11 +338,18 @@ def test_worker_processes_fake_job_successfully(tmp_path) -> None:
       result = json.loads(Path(job.result_path).read_text(encoding="utf-8"))
       assert result["text"] == "Fake transcript for testing."
       assert result["language"] == "en"
+      assert job.phase == "completed"
+      assert job.progress == 100
+      assert job.attempts == 1
+      assert job.heartbeat_at is not None
+      assert job.completed_at is not None
+      assert input_path.exists() is False
 
 
 def test_worker_marks_job_failed_on_error(tmp_path) -> None:
     class BrokenEngine(FakeTranscriptionEngine):
-        def transcribe(self, input_path: Path, *, transcription_language: str | None = None):  # type: ignore[override]
+        def transcribe(self, input_path: Path, **kwargs):  # type: ignore[override]
+            del input_path, kwargs
             raise RuntimeError("boom")
 
     settings = make_settings(tmp_path)
@@ -348,6 +369,144 @@ def test_worker_marks_job_failed_on_error(tmp_path) -> None:
       assert job is not None
       assert job.status == JOB_STATUS_FAILED
       assert job.error == "boom"
+
+
+def test_worker_honours_cancellation_and_removes_input(tmp_path) -> None:
+    class CancelledEngine(FakeTranscriptionEngine):
+        def transcribe(self, input_path: Path, **kwargs):  # type: ignore[override]
+            del input_path, kwargs
+            raise TranscriptionCancelled("cancelled")
+
+    settings = make_settings(tmp_path)
+    engine = create_engine_for_settings(settings)
+    Base.metadata.create_all(engine)
+    session_factory = create_session_factory(engine)
+    input_dir = tmp_path / "audio" / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    input_path = input_dir / "test.mp3"
+    input_path.write_bytes(b"audio")
+    seed_job(session_factory, input_path)
+
+    process_audio_job(session_factory, CancelledEngine(), "job-1")
+
+    with session_factory() as session:
+        job = session.get(Job, "job-1")
+        assert job is not None
+        assert job.status == JOB_STATUS_CANCELLED
+        assert job.completed_at is not None
+    assert input_path.exists() is False
+
+
+def test_word_level_diarization_splits_segment_on_speaker_change() -> None:
+    transcript = TranscriptResult(
+        text="Bonjour comment allez-vous",
+        language="fr",
+        duration=2.0,
+        segments=[
+            TranscriptSegment(
+                start=0.0,
+                end=2.0,
+                text="Bonjour comment allez-vous",
+                words=[
+                    TranscriptWord(start=0.0, end=0.5, text="Bonjour"),
+                    TranscriptWord(start=0.5, end=1.0, text="comment"),
+                    TranscriptWord(start=1.1, end=1.5, text="allez"),
+                    TranscriptWord(start=1.5, end=2.0, text="vous"),
+                ],
+            )
+        ],
+    )
+    turns = [
+        SpeakerTurn(start=0.0, end=1.05, speaker="Speaker 1"),
+        SpeakerTurn(start=1.05, end=2.1, speaker="Speaker 2"),
+    ]
+
+    result = apply_speaker_turns(transcript, turns)
+
+    assert result.diarization_status == "completed"
+    assert [(segment.speaker, segment.text) for segment in result.segments] == [
+        ("Speaker 1", "Bonjour comment"),
+        ("Speaker 2", "allez vous"),
+    ]
+
+
+def test_worker_keeps_transcript_when_optional_diarization_fails(tmp_path) -> None:
+    class BrokenDiarizationClient:
+        def diarize(self, audio_path: Path):
+            del audio_path
+            raise RuntimeError("GPU busy")
+
+    settings = make_settings(tmp_path)
+    engine = create_engine_for_settings(settings)
+    Base.metadata.create_all(engine)
+    session_factory = create_session_factory(engine)
+    input_path = tmp_path / "audio" / "input" / "test.mp3"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_bytes(b"audio")
+    seed_job(session_factory, input_path, metadata={"diarization_enabled": True})
+
+    process_audio_job(
+        session_factory,
+        FakeTranscriptionEngine(),
+        "job-1",
+        diarization_client=BrokenDiarizationClient(),  # type: ignore[arg-type]
+    )
+
+    with session_factory() as session:
+        job = session.get(Job, "job-1")
+        assert job is not None
+        assert job.status == JOB_STATUS_COMPLETED
+        result = json.loads(Path(job.result_path or "").read_text(encoding="utf-8"))
+        assert result["text"] == "Fake transcript for testing."
+        assert result["diarization_status"] == "failed"
+
+
+def test_worker_requeues_interrupted_jobs_below_attempt_limit(tmp_path) -> None:
+    settings = make_settings(tmp_path)
+    engine = create_engine_for_settings(settings)
+    Base.metadata.create_all(engine)
+    session_factory = create_session_factory(engine)
+    input_path = tmp_path / "audio" / "input" / "test.mp3"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_bytes(b"audio")
+    seed_job(session_factory, input_path)
+    with session_factory() as session:
+        job = session.get(Job, "job-1")
+        assert job is not None
+        job.status = JOB_STATUS_PROCESSING
+        job.attempts = 1
+        session.commit()
+
+        recovered = recover_processing_jobs(session, max_attempts=3, now=datetime.now(UTC))
+
+        assert recovered == ["job-1"]
+        session.refresh(job)
+        assert job.status == "queued"
+        assert "automatic retry" in (job.progress_message or "")
+
+
+def test_worker_fails_interrupted_job_at_attempt_limit(tmp_path) -> None:
+    settings = make_settings(tmp_path)
+    engine = create_engine_for_settings(settings)
+    Base.metadata.create_all(engine)
+    session_factory = create_session_factory(engine)
+    input_path = tmp_path / "audio" / "input" / "test.mp3"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_bytes(b"audio")
+    seed_job(session_factory, input_path)
+    with session_factory() as session:
+        job = session.get(Job, "job-1")
+        assert job is not None
+        job.status = JOB_STATUS_PROCESSING
+        job.attempts = 3
+        session.commit()
+
+        recovered = recover_processing_jobs(session, max_attempts=3, now=datetime.now(UTC))
+
+        assert recovered == []
+        session.refresh(job)
+        assert job.status == JOB_STATUS_FAILED
+        assert "Maximum transcription attempts" in (job.error or "")
 
 
 def test_check_engine_reports_success_for_fake_engine(tmp_path) -> None:

@@ -1,10 +1,13 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import lru_cache
+import secrets
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
+import httpx
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from redis import Redis
 from sqlalchemy.orm import Session
 
 from app.audio import sanitize_original_filename, save_uploaded_audio, validate_transcription_language
@@ -17,8 +20,12 @@ from app.token_repository import token_has_scope
 from app.jobs import (
     JOB_STATUS_COMPLETED,
     create_audio_transcription_job,
+    decode_job_metadata,
     ensure_audio_job_capacity,
+    job_is_stalled,
+    list_jobs_for_user,
     read_transcript_result,
+    request_job_cancellation,
     require_job_for_user,
 )
 from app.meetings import (
@@ -28,10 +35,12 @@ from app.meetings import (
     build_deep_think_section_system_prompt,
     build_deep_think_section_user_prompt,
     build_deep_think_sections,
+    build_meeting_predigest_chunk_user_prompt,
     build_meeting_user_prompt_from_brief,
     extract_transcript_text_from_result,
     prepare_meeting_from_job_request,
     prepare_meeting_request,
+    split_transcript_for_predigest,
     validate_audio_job_for_meeting,
 )
 from app.notes import prepare_summary_request
@@ -43,6 +52,8 @@ from app.schemas import (
     AssistantUsageResponse,
     HealthResponse,
     JobResultResponse,
+    JobCancelResponse,
+    JobListResponse,
     JobStatusResponse,
     MeetingGenerateFromJobRequest,
     MeetingGenerateFromJobResponse,
@@ -53,6 +64,8 @@ from app.schemas import (
     ModelsResponse,
     NoteSummarizeRequest,
     NoteSummarizeResponse,
+    ReadinessComponentResponse,
+    ReadinessResponse,
     TranscriptResponse,
     UsageResponse,
     VaultAskRequest,
@@ -70,7 +83,7 @@ from app.services.llm_client import FakeLlmClient, LlmClient, OllamaLlmClient
 from app.services.embedding_client import OllamaEmbeddingClient
 from app.services.ollama_client import OllamaClient, OllamaRequestLimiter, OllamaResponseError, OllamaUnavailableError
 from app.database import get_db_session
-from app.models import VaultChunk, VaultDocument
+from app.models import Job, VaultChunk, VaultDocument
 from app.vault_rag import (
     build_insufficient_sources_answer,
     build_vault_answer_prompt,
@@ -80,7 +93,7 @@ from app.vault_rag import (
     search_vault,
     validate_vault_model,
 )
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 
 settings = get_settings()
 
@@ -143,6 +156,114 @@ def get_embedding_client() -> OllamaEmbeddingClient:
 @app.get("/v1/health", tags=["system"], response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(status="ok")
+
+
+def check_runtime_components(session: Session) -> tuple[dict[str, bool], int]:
+    current_settings = get_settings()
+    components = {"gateway": True, "database": False, "redis": False, "worker": False, "ollama": False}
+    queue_depth = 0
+    try:
+        session.execute(text("SELECT 1"))
+        components["database"] = True
+    except Exception:
+        session.rollback()
+
+    redis_client: Redis | None = None
+    try:
+        redis_client = Redis.from_url(current_settings.redis_url, decode_responses=True)
+        components["redis"] = bool(redis_client.ping())
+        components["worker"] = redis_client.get(current_settings.worker_heartbeat_key) is not None
+        queue_depth = int(redis_client.llen(current_settings.audio_queue_name))
+    except Exception:
+        pass
+    finally:
+        if redis_client is not None:
+            redis_client.close()
+
+    try:
+        with httpx.Client(
+            base_url=current_settings.ollama_base_url.rstrip("/"),
+            timeout=current_settings.health_dependency_timeout_seconds,
+        ) as client:
+            response = client.get("/api/tags")
+            components["ollama"] = response.status_code == 200
+    except httpx.HTTPError:
+        pass
+    if current_settings.diarization_service_url:
+        components["diarization"] = False
+        try:
+            response = httpx.get(
+                f"{current_settings.diarization_service_url.rstrip('/')}/v1/health",
+                timeout=current_settings.health_dependency_timeout_seconds,
+            )
+            payload = response.json() if response.status_code == 200 else {}
+            components["diarization"] = payload.get("status") == "ok" if isinstance(payload, dict) else False
+        except (httpx.HTTPError, ValueError):
+            pass
+    return components, queue_depth
+
+
+@app.get("/v1/health/ready", tags=["system"], response_model=ReadinessResponse)
+def readiness(
+    token: Annotated[ApiToken, Depends(get_current_token)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> ReadinessResponse:
+    del token
+    components, _ = check_runtime_components(session)
+    return ReadinessResponse(
+        status="ok" if all(components.values()) else "degraded",
+        components={
+            name: ReadinessComponentResponse(status="up" if is_up else "down")
+            for name, is_up in components.items()
+        },
+    )
+
+
+def require_metrics_access(authorization: str | None) -> None:
+    expected_token = get_settings().metrics_token.strip()
+    if not expected_token:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+    scheme, separator, supplied_token = (authorization or "").partition(" ")
+    if separator != " " or scheme.lower() != "bearer" or not secrets.compare_digest(supplied_token, expected_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid metrics token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+@app.get("/metrics", tags=["system"], include_in_schema=False)
+def metrics(
+    session: Annotated[Session, Depends(get_db_session)],
+    authorization: Annotated[str | None, Header()] = None,
+) -> Response:
+    require_metrics_access(authorization)
+    components, queue_depth = check_runtime_components(session)
+    counts = dict(session.execute(select(Job.status, func.count()).group_by(Job.status)).all()) if components["database"] else {}
+    processing_jobs = list(session.scalars(select(Job).where(Job.status == "processing"))) if components["database"] else []
+    stalled_jobs = sum(
+        1
+        for job in processing_jobs
+        if job_is_stalled(job, stalled_after_seconds=get_settings().job_stalled_after_seconds)
+    )
+    lines = [
+        "# HELP obsidian_ai_component_up Whether an Obsidian AI runtime component is reachable.",
+        "# TYPE obsidian_ai_component_up gauge",
+        *[f'obsidian_ai_component_up{{component="{name}"}} {1 if is_up else 0}' for name, is_up in components.items()],
+        "# HELP obsidian_ai_audio_queue_depth Number of transcription jobs waiting in Redis.",
+        "# TYPE obsidian_ai_audio_queue_depth gauge",
+        f"obsidian_ai_audio_queue_depth {queue_depth}",
+        "# HELP obsidian_ai_jobs Current jobs grouped by status.",
+        "# TYPE obsidian_ai_jobs gauge",
+        *[
+            f'obsidian_ai_jobs{{status="{job_status}"}} {int(counts.get(job_status, 0))}'
+            for job_status in ("queued", "processing", "completed", "failed", "cancelled")
+        ],
+        "# HELP obsidian_ai_jobs_stalled Processing jobs whose worker heartbeat is stale.",
+        "# TYPE obsidian_ai_jobs_stalled gauge",
+        f"obsidian_ai_jobs_stalled {stalled_jobs}",
+    ]
+    return Response(content="\n".join(lines) + "\n", media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/v1/models", tags=["models"], response_model=ModelsResponse)
@@ -275,16 +396,39 @@ async def run_meeting_generation(
         )
 
     user_prompt = prepared_request.user_prompt
+    generation_stages: int | None = None
+    generation_analysis: MeetingGenerationAnalysisResponse | None = None
     if prepared_request.should_predigest:
-        brief = await llm_client.predigest_meeting(
-            model=prepared_request.selected_model,
-            title=prepared_request.title,
-            transcript_chars=prepared_request.transcript_chars,
-            manual_notes_chars=prepared_request.manual_notes_chars,
-            system_prompt=prepared_request.predigest_system_prompt,
-            user_prompt=prepared_request.predigest_user_prompt,
+        current_settings = get_settings()
+        chunks = split_transcript_for_predigest(prepared_request.cleaned_transcript, current_settings)
+        briefs: list[str] = []
+        for index, transcript_chunk in enumerate(chunks):
+            brief = await llm_client.predigest_meeting(
+                model=prepared_request.selected_model,
+                title=prepared_request.title,
+                transcript_chars=len(transcript_chunk),
+                manual_notes_chars=min(
+                    prepared_request.manual_notes_chars,
+                    current_settings.meeting_predigest_manual_notes_max_chars,
+                ),
+                system_prompt=prepared_request.predigest_system_prompt,
+                user_prompt=build_meeting_predigest_chunk_user_prompt(
+                    prepared_request,
+                    transcript_chunk,
+                    chunk_index=index,
+                    chunk_count=len(chunks),
+                    manual_notes_max_chars=current_settings.meeting_predigest_manual_notes_max_chars,
+                ),
+            )
+            briefs.append(f"### Chronological brief {index + 1}/{len(chunks)}\n\n{brief.content.strip()}")
+        user_prompt = build_meeting_user_prompt_from_brief(prepared_request, "\n\n".join(briefs))
+        generation_stages = len(chunks) + 1
+        generation_analysis = build_meeting_generation_analysis(
+            prepared_request,
+            sections_count=len(chunks),
+            section_titles=[f"Chronological brief {index + 1}" for index in range(len(chunks))],
+            diarization_status=diarization_status,
         )
-        user_prompt = build_meeting_user_prompt_from_brief(prepared_request, brief.content)
     result = await llm_client.generate_meeting(
         model=prepared_request.selected_model,
         title=prepared_request.title,
@@ -295,7 +439,7 @@ async def run_meeting_generation(
         system_prompt=prepared_request.system_prompt,
         user_prompt=user_prompt,
     )
-    return result.model, result.content, None, None
+    return result.model, result.content, generation_stages, generation_analysis
 
 
 def build_meeting_generation_analysis(
@@ -663,6 +807,7 @@ async def transcribe_audio(
     session: Annotated[Session, Depends(get_db_session)],
     queue: Annotated[AudioJobQueue, Depends(get_audio_job_queue)],
     transcription_language: Annotated[str, Form()] = "auto",
+    diarization_enabled: Annotated[bool, Form()] = False,
 ) -> AudioTranscriptionQueuedResponse:
     settings = get_settings()
     ensure_audio_job_capacity(
@@ -678,11 +823,47 @@ async def transcribe_audio(
         input_path=input_path,
         metadata={
             "transcription_language": requested_language,
+            "diarization_enabled": diarization_enabled,
             "original_filename": sanitize_original_filename(file.filename),
         },
     )
     queue.enqueue_audio_transcription(job.id, input_path=input_path, transcription_language=requested_language)
     return AudioTranscriptionQueuedResponse(job_id=job.id, status=job.status)
+
+
+def build_job_status_response(job) -> JobStatusResponse:
+    current_settings = get_settings()
+    metadata = decode_job_metadata(job)
+    original_filename = metadata.get("original_filename")
+    return JobStatusResponse(
+        job_id=job.id,
+        status=job.status,
+        type=job.type,
+        display_name=str(original_filename) if isinstance(original_filename, str) else None,
+        phase=job.phase or job.status,
+        progress=job.progress or 0,
+        progress_message=job.progress_message,
+        attempts=job.attempts or 0,
+        stalled=job_is_stalled(job, stalled_after_seconds=current_settings.job_stalled_after_seconds),
+        cancel_requested=job.cancel_requested_at is not None,
+        created_at=job.created_at.isoformat(),
+        updated_at=job.updated_at.isoformat(),
+        started_at=job.started_at.isoformat() if job.started_at else None,
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        heartbeat_at=job.heartbeat_at.isoformat() if job.heartbeat_at else None,
+        error=job.error,
+    )
+
+
+@app.get("/v1/jobs", tags=["jobs"], response_model=JobListResponse)
+def list_jobs(
+    token: Annotated[ApiToken, Depends(get_current_token)],
+    session: Annotated[Session, Depends(get_db_session)],
+    limit: int | None = Query(default=None, ge=1, le=200),
+) -> JobListResponse:
+    selected_limit = min(limit or get_settings().job_history_limit, get_settings().job_history_limit)
+    jobs = list_jobs_for_user(session, user_id=token.user_id, limit=selected_limit)
+    return JobListResponse(jobs=[build_job_status_response(job) for job in jobs])
 
 
 @app.get("/v1/jobs/{job_id}", tags=["jobs"], response_model=JobStatusResponse)
@@ -692,12 +873,21 @@ def get_job(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JobStatusResponse:
     job = require_job_for_user(session, job_id=job_id, user_id=token.user_id)
-    return JobStatusResponse(
+    return build_job_status_response(job)
+
+
+@app.post("/v1/jobs/{job_id}/cancel", tags=["jobs"], response_model=JobCancelResponse)
+def cancel_job(
+    job_id: str,
+    token: Annotated[ApiToken, Depends(get_current_token)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JobCancelResponse:
+    job = require_job_for_user(session, job_id=job_id, user_id=token.user_id)
+    job = request_job_cancellation(session, job)
+    return JobCancelResponse(
         job_id=job.id,
         status=job.status,
-        created_at=job.created_at.isoformat(),
-        updated_at=job.updated_at.isoformat(),
-        error=job.error,
+        cancel_requested=job.cancel_requested_at is not None,
     )
 
 

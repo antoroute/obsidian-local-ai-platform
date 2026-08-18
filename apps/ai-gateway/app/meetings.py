@@ -27,7 +27,8 @@ Return final Markdown directly, without wrapping it in triple backticks or a glo
 Use the provided template as structural guidance, but remove any section that cannot be filled with useful supported information.
 Do not create empty sections. Do not write filler such as "Aucune information disponible", "Non renseigne", "Pas d'element", or long explanations that a section is empty.
 Prefer the core blocks summary, decisions, actions, open points, and uncertainties unless the template explicitly requests a narrower variant.
-Write action items in a simple format: Action | Owner if known | Due date if known.
+Write every confirmed action as an Obsidian-compatible task: `- [ ] Concrete action — @Owner 📅 YYYY-MM-DD`.
+Omit owner or due date when unknown; never invent either. Keep uncertain candidate actions under uncertainties, not in the task list.
 Avoid generic prose, long introductions, and decorative formatting.
 Ensure the final Markdown is concrete, useful, and supported by the sources."""
 
@@ -36,7 +37,7 @@ This is not the final report.
 Extract only supported information from the transcript and manual notes.
 Manual notes have priority over transcript when they conflict or add precision.
 Anonymous transcript speaker labels are indicative only: use them to follow exchanges, but never map them to real names unless the source explicitly supports it.
-Return compact Markdown with:
+Return at most 350 words of compact Markdown with:
 - Themes
 - Confirmed decisions
 - Candidate actions
@@ -421,6 +422,63 @@ def build_meeting_user_prompt_from_brief(prepared_request: PreparedMeetingReques
         f"{manual_notes_block}\n\n"
         "Prepared meeting brief (compressed source derived from the transcript):\n"
         f"{brief_block}\n"
+    )
+
+
+def split_transcript_for_predigest(transcript: str, settings: Settings) -> list[str]:
+    text = transcript.strip()
+    if not text:
+        return []
+    target_size = max(
+        settings.meeting_predigest_chunk_chars,
+        (len(text) + settings.meeting_predigest_max_chunks - 1) // settings.meeting_predigest_max_chunks + 1200,
+    )
+    chunks: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        proposed_end = min(len(text), cursor + target_size)
+        end = proposed_end
+        if proposed_end < len(text):
+            search_start = max(cursor + target_size // 2, proposed_end - 1200)
+            boundary_candidates = [
+                text.rfind("\n", search_start, proposed_end),
+                text.rfind(". ", search_start, proposed_end),
+                text.rfind("? ", search_start, proposed_end),
+                text.rfind("! ", search_start, proposed_end),
+            ]
+            best_boundary = max(boundary_candidates)
+            if best_boundary > cursor:
+                end = best_boundary + 1
+        chunk = text[cursor:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        cursor = max(end, cursor + 1)
+    return chunks
+
+
+def build_meeting_predigest_chunk_user_prompt(
+    prepared_request: PreparedMeetingRequest,
+    transcript_chunk: str,
+    *,
+    chunk_index: int,
+    chunk_count: int,
+    manual_notes_max_chars: int,
+) -> str:
+    participants_block = ", ".join(prepared_request.participants) if prepared_request.participants else "No participant list was provided."
+    manual_notes = prepared_request.manual_notes[:manual_notes_max_chars]
+    if len(prepared_request.manual_notes) > manual_notes_max_chars:
+        manual_notes += "\n[Manual notes continue and will be supplied again to the final report.]"
+    return (
+        "Prepare a compact private brief for one chronological part of a meeting transcript.\n"
+        "Keep decisions, concrete actions, owners, due dates, disagreements, names, numbers and open questions.\n"
+        "Do not write the final meeting report yet. Do not invent. Return at most 350 words.\n\n"
+        f"Meeting title: {prepared_request.title}\n"
+        f"Chronological part: {chunk_index + 1}/{chunk_count}\n"
+        f"Participants: {participants_block}\n\n"
+        "Manual notes (priority source; possibly truncated here, complete notes are retained for the final pass):\n"
+        f"{manual_notes or 'No manual notes were provided.'}\n\n"
+        "Transcript (primary source for this chronological part):\n"
+        f"{transcript_chunk}"
     )
 
 

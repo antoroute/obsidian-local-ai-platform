@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import HTTPException, status
@@ -16,6 +17,8 @@ JOB_STATUS_QUEUED = "queued"
 JOB_STATUS_PROCESSING = "processing"
 JOB_STATUS_COMPLETED = "completed"
 JOB_STATUS_FAILED = "failed"
+JOB_STATUS_CANCELLED = "cancelled"
+JOB_TERMINAL_STATUSES = {JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_CANCELLED}
 
 
 def encode_job_metadata(metadata: dict[str, object] | None) -> str | None:
@@ -55,10 +58,18 @@ def create_audio_transcription_job(
         user_id=user_id,
         type=JOB_TYPE_AUDIO_TRANSCRIPTION,
         status=JOB_STATUS_QUEUED,
+        phase="queued",
+        progress=0,
+        progress_message="Waiting for the transcription worker.",
         input_path=input_path,
         result_path=None,
         error=None,
         metadata_json=encode_job_metadata(metadata),
+        attempts=0,
+        heartbeat_at=None,
+        started_at=None,
+        completed_at=None,
+        cancel_requested_at=None,
         created_at=now,
         updated_at=now,
     )
@@ -99,6 +110,41 @@ def require_job_for_user(session: Session, *, job_id: str, user_id: str) -> Job:
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
     return job
+
+
+def list_jobs_for_user(session: Session, *, user_id: str, limit: int) -> list[Job]:
+    statement = select(Job).where(Job.user_id == user_id).order_by(Job.created_at.desc()).limit(limit)
+    return list(session.scalars(statement))
+
+
+def request_job_cancellation(session: Session, job: Job) -> Job:
+    if job.status in JOB_TERMINAL_STATUSES:
+        return job
+
+    now = utc_now()
+    job.cancel_requested_at = now
+    job.updated_at = now
+    if job.status == JOB_STATUS_QUEUED:
+        job.status = JOB_STATUS_CANCELLED
+        job.phase = "cancelled"
+        job.progress_message = "Transcription cancelled before processing started."
+        job.completed_at = now
+    else:
+        job.progress_message = "Cancellation requested; waiting for the current audio segment to finish."
+    session.commit()
+    session.refresh(job)
+    return job
+
+
+def job_is_stalled(job: Job, *, stalled_after_seconds: int, now: datetime | None = None) -> bool:
+    if job.status != JOB_STATUS_PROCESSING:
+        return False
+    last_activity = job.heartbeat_at or job.updated_at
+    if last_activity is None:
+        return True
+    if last_activity.tzinfo is None:
+        last_activity = last_activity.replace(tzinfo=UTC)
+    return (now or utc_now()) - last_activity > timedelta(seconds=stalled_after_seconds)
 
 
 def read_transcript_result(job: Job) -> dict[str, object]:

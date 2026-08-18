@@ -75,6 +75,25 @@ jobs:
         working-directory: apps/whisper-worker
         run: pytest -q
 
+  diarization:
+    name: GPU diarization coordinator
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Use Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: apps/diarization-service/pyproject.toml
+      - name: Install dependencies
+        working-directory: apps/diarization-service
+        run: pip install .[dev]
+      - name: Run tests
+        working-directory: apps/diarization-service
+        run: pytest -q
+
   publish-images:
     name: Publish ${{ matrix.name }}
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -82,6 +101,7 @@ jobs:
       - plugin
       - gateway
       - worker
+      - diarization
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -95,6 +115,9 @@ jobs:
           - name: whisper-worker
             context: apps/whisper-worker
             image: ghcr.io/antoroute/obsidian-local-ai-platform-whisper-worker
+          - name: diarization-service
+            context: apps/diarization-service
+            image: ghcr.io/antoroute/obsidian-local-ai-platform-diarization-service
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

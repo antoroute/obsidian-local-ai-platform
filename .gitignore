@@ -8,6 +8,7 @@ Thumbs.db
 .env
 .env.local
 .env.homelab
+.env.gpu
 .env.*.local
 
 # Python

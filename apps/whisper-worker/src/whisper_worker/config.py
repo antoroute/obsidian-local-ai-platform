@@ -21,6 +21,13 @@ class WorkerSettings:
     huggingface_hub_cache: str | None
     whisper_cpu_threads: int = 0
     whisper_num_workers: int = 1
+    job_max_attempts: int = 3
+    job_progress_min_interval_seconds: float = 2.0
+    worker_heartbeat_key: str = "obsidian_ai:whisper_worker:heartbeat"
+    worker_heartbeat_ttl_seconds: int = 15
+    diarization_service_url: str = ""
+    diarization_service_token: str = ""
+    diarization_timeout_seconds: int = 900
 
 
 def get_settings() -> WorkerSettings:
@@ -40,4 +47,11 @@ def get_settings() -> WorkerSettings:
         huggingface_hub_cache=os.getenv("HUGGINGFACE_HUB_CACHE") or None,
         whisper_cpu_threads=int(os.getenv("WHISPER_CPU_THREADS", "0")),
         whisper_num_workers=int(os.getenv("WHISPER_NUM_WORKERS", "1")),
+        job_max_attempts=max(1, int(os.getenv("JOB_MAX_ATTEMPTS", "3"))),
+        job_progress_min_interval_seconds=max(0.1, float(os.getenv("JOB_PROGRESS_MIN_INTERVAL_SECONDS", "2"))),
+        worker_heartbeat_key=os.getenv("WORKER_HEARTBEAT_KEY", "obsidian_ai:whisper_worker:heartbeat"),
+        worker_heartbeat_ttl_seconds=max(5, int(os.getenv("WORKER_HEARTBEAT_TTL_SECONDS", "15"))),
+        diarization_service_url=os.getenv("DIARIZATION_SERVICE_URL", "").rstrip("/"),
+        diarization_service_token=os.getenv("DIARIZATION_SERVICE_TOKEN", ""),
+        diarization_timeout_seconds=max(30, int(os.getenv("DIARIZATION_TIMEOUT_SECONDS", "900"))),
     )

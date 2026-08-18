@@ -30,7 +30,8 @@ const DEFAULT_RECORDING_EXTENSION = ".webm";
 const DEFAULT_RECORDING_MIME_TYPE = "audio/webm";
 const SUPPORTED_AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".webm", ".ogg"]);
 const LEGACY_DEFAULT_MODELS = new Set(["qwen2.5:7b", "qwen2.5:14b"]);
-const PLUGIN_BUILD_ID = "0.1.2-template-stability";
+const PLUGIN_BUILD_ID = "0.2.0-job-center-gpu-diarization";
+const RECOMMENDED_TEMPLATE_VERSION = 2;
 type TemplateInstallSet = "minimal" | "fr" | "en" | "all";
 type TemplatePurpose = "note_summary" | "meeting_summary";
 type TemplateGroup = "note_summary" | "meeting_note" | "meeting_summary" | "actions" | "technical" | "client" | "other";
@@ -118,7 +119,7 @@ Objectif : produire un compte rendu direct, compact et utile.
 Respecter strictement les sources fournies. Ne pas inventer.
 Supprimer toute section vide ou non utile.
 Si une decision ou action est incertaine, la mettre dans Incertitudes plutot que l'inventer.
-Actions au format simple : Action | Responsable si connu | Echeance si connue.
+Actions au format Obsidian Tasks : - [ ] Action concrete — @Responsable 📅 YYYY-MM-DD. Omettre responsable ou echeance s'ils sont inconnus.
 
 ## Resume executif
 
@@ -198,7 +199,7 @@ Preserve useful agenda structure, pillars, questions, answers, decisions, action
 Use the transcript to enrich the manual notes, not to replace them with a generic summary.
 Remove any empty or unhelpful section.
 If a decision or action is uncertain, put it under Uncertainties instead of inventing it.
-Actions format: Action | Owner if known | Due date if known.
+Obsidian Tasks format: - [ ] Concrete action — @Owner 📅 YYYY-MM-DD. Omit owner or due date when unknown.
 
 ## Executive summary
 
@@ -248,7 +249,7 @@ Keep important sub-sections from the notes, such as pillars or workstreams.
 
 ## Actions
 
-Action | Owner if known | Due date if known
+- [ ] Concrete action — @Owner 📅 YYYY-MM-DD
 
 ## Open points
 
@@ -276,7 +277,7 @@ Ne pas inventer de responsable ou d'echeance.
 
 ## Actions
 
-- Action | Responsable si connu | Echeance si connue | Source ou incertitude
+- [ ] Action concrete — @Responsable 📅 YYYY-MM-DD
 `,
   },
   {
@@ -296,7 +297,7 @@ Do not invent owners or due dates.
 
 ## Actions
 
-- Action | Owner if known | Due date if known | Source or uncertainty
+- [ ] Concrete action — @Owner 📅 YYYY-MM-DD
 `,
   },
   {
@@ -376,7 +377,7 @@ Preserve important subsections from the notes, such as pillars, workstreams, que
 
 ## Actions
 
-Action | Owner if known | Due date if known
+- [ ] Concrete action — @Owner 📅 YYYY-MM-DD
 
 ## Open points
 
@@ -442,6 +443,11 @@ interface ModelsResponsePayload {
   models: string[];
 }
 
+interface RuntimeHealthResponsePayload {
+  status: "ok" | "degraded";
+  components: Record<string, { status: "up" | "down" }>;
+}
+
 interface AudioJobQueuedResponsePayload {
   job_id: string;
   status: "queued";
@@ -449,10 +455,31 @@ interface AudioJobQueuedResponsePayload {
 
 interface JobStatusResponsePayload {
   job_id: string;
-  status: "queued" | "processing" | "completed" | "failed";
+  status: "queued" | "processing" | "completed" | "failed" | "cancelled";
+  type: string;
+  display_name?: string | null;
+  phase: string;
+  progress: number;
+  progress_message: string | null;
+  attempts: number;
+  stalled: boolean;
+  cancel_requested: boolean;
   created_at: string;
   updated_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  heartbeat_at?: string | null;
   error: string | null;
+}
+
+interface JobListResponsePayload {
+  jobs: JobStatusResponsePayload[];
+}
+
+interface JobCancelResponsePayload {
+  job_id: string;
+  status: JobStatusResponsePayload["status"];
+  cancel_requested: boolean;
 }
 
 interface TranscriptSegmentPayload {
@@ -518,6 +545,7 @@ interface TemplateChoice {
   language: string | null;
   type: string | null;
   group: TemplateGroup;
+  version: number | null;
 }
 
 interface AudioInputDeviceChoice {
@@ -682,6 +710,7 @@ interface PluginSettings {
   meetingsFolder: string;
   recordingsFolder: string;
   transcriptionLanguage: "auto" | "fr" | "en";
+  diarizationEnabled: boolean;
   outputLanguage: "same_as_meeting" | "fr" | "en";
   recordingSource: RecordingSource;
   preferredTemplateLanguage: "auto" | "fr" | "en";
@@ -725,6 +754,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
   meetingsFolder: DEFAULT_MEETINGS_FOLDER,
   recordingsFolder: DEFAULT_RECORDINGS_FOLDER,
   transcriptionLanguage: "auto",
+  diarizationEnabled: false,
   outputLanguage: "same_as_meeting",
   recordingSource: "microphone_only",
   preferredTemplateLanguage: "auto",
@@ -764,6 +794,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
   activeRecording: ActiveRecordingSession | null = null;
   audioInputDevices: AudioInputDeviceChoice[] = [{ deviceId: "", label: "Default microphone" }];
   ragIndexProgress: VaultIndexProgress = createIdleVaultIndexProgress();
+  runtimeHealth: RuntimeHealthResponsePayload | null = null;
   private ragAutoIndexTimers = new Map<string, number>();
   private ragIndexQueue: Array<{ file: TFile; reason: RagRecentOperation["action"] }> = [];
   private ragIndexQueueRunning = false;
@@ -1613,6 +1644,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         language: null,
         type: "note_summary",
         group: "note_summary",
+        version: RECOMMENDED_TEMPLATE_VERSION,
       },
       {
         label: "Built-in meeting report",
@@ -1622,6 +1654,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         language: null,
         type: "meeting_summary",
         group: "meeting_summary",
+        version: RECOMMENDED_TEMPLATE_VERSION,
       },
     ];
     const templatesFolder = this.getTemplatesFolder();
@@ -1647,6 +1680,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
         language: parsedTemplate.metadata.language,
         type: parsedTemplate.metadata.type,
         group,
+        version: parsedTemplate.metadata.version,
       });
     }
 
@@ -1673,10 +1707,35 @@ export default class LocalAiPlatformPlugin extends Plugin {
       });
 
       const payload = this.parseModelsResponse(responseText);
-      new Notice(`Connection successful. Models: ${payload.models.join(", ")}`, 8000);
+      const runtimeHealth = await this.getRuntimeHealth();
+      const componentSummary = Object.entries(runtimeHealth.components)
+        .map(([name, component]) => `${name}=${component.status}`)
+        .join(", ");
+      new Notice(`Connexion OK. Modeles: ${payload.models.join(", ")}. Services: ${componentSummary}`, 10000);
     } catch (error) {
       this.showUserFacingError(error);
     }
+  }
+
+  async getRuntimeHealth(): Promise<RuntimeHealthResponsePayload> {
+    const responseText = await this.performJsonRequest({
+      apiBaseUrl: this.getApiBaseUrl(),
+      apiToken: this.getApiToken(),
+      path: "/v1/health/ready",
+      method: "GET",
+      errorMap: {
+        401: "Le token API est invalide ou expire.",
+        503: "La sonde des services IA est indisponible.",
+      },
+      unavailableMessage: "La sonde des services IA est inaccessible.",
+      invalidJsonMessage: "Le serveur a retourne un etat des services invalide.",
+    });
+    const parsed = this.parseJson(responseText, "Le serveur a retourne un etat des services invalide.");
+    if (!isRuntimeHealthResponsePayload(parsed)) {
+      throw new UserFacingError("Le serveur a retourne un etat des services invalide.");
+    }
+    this.runtimeHealth = parsed;
+    return parsed;
   }
 
   async requestSummary(apiBaseUrl: string, apiToken: string, payload: SummarizeRequestPayload): Promise<SummarizeResponsePayload> {
@@ -2394,7 +2453,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       if (this.app.vault.getAbstractFileByPath(path)) {
         continue;
       }
-      await this.app.vault.create(path, template.content);
+      await this.app.vault.create(path, addRecommendedTemplateVersion(template.content));
       created += 1;
     }
 
@@ -2402,11 +2461,56 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return created;
   }
 
+  async updateRecommendedTemplates(): Promise<number> {
+    const templatesFolder = this.getTemplatesFolder();
+    await ensureFolderExists(this.app, templatesFolder);
+    let updated = 0;
+    for (const template of RECOMMENDED_TEMPLATES) {
+      const path = normalizePath(`${templatesFolder}/${template.fileName}`);
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof TFile)) {
+        continue;
+      }
+      const latestContent = addRecommendedTemplateVersion(template.content);
+      const currentContent = await this.app.vault.read(file);
+      if (currentContent.replace(/\r\n/g, "\n").trim() === latestContent.trim()) {
+        continue;
+      }
+      const backupPath = getAvailableVaultPath(
+        this.app,
+        normalizePath(`${templatesFolder}/${file.basename} - sauvegarde ${formatDateTimeForFile(new Date())}.md`),
+      );
+      await this.app.vault.create(backupPath, currentContent);
+      await this.app.vault.modify(file, latestContent);
+      updated += 1;
+    }
+    new Notice(`Templates mis a jour: ${updated}. Une sauvegarde a ete creee pour chaque fichier remplace.`);
+    return updated;
+  }
+
+  async duplicateTemplate(choice: TemplateChoice): Promise<TFile> {
+    if (!choice.sourcePath) {
+      throw new UserFacingError("Le template integre doit d'abord etre installe avant d'etre duplique.");
+    }
+    const source = this.app.vault.getAbstractFileByPath(choice.sourcePath);
+    if (!(source instanceof TFile)) {
+      throw new UserFacingError("Le fichier template est introuvable.");
+    }
+    const copyPath = getAvailableVaultPath(
+      this.app,
+      normalizePath(`${source.parent?.path || this.getTemplatesFolder()}/${source.basename} - copie.md`),
+    );
+    const copy = await this.app.vault.create(copyPath, await this.app.vault.read(source));
+    new Notice(`Template duplique: ${copy.path}`);
+    return copy;
+  }
+
   async uploadAudio(apiBaseUrl: string, apiToken: string, audioFile: File): Promise<AudioJobQueuedResponsePayload> {
     try {
       const formData = new FormData();
       formData.append("file", audioFile);
       formData.append("transcription_language", this.getTranscriptionLanguage());
+      formData.append("diarization_enabled", this.settings.diarizationEnabled ? "true" : "false");
 
       const response = await fetch(`${apiBaseUrl}/v1/audio/transcribe`, {
         method: "POST",
@@ -2442,6 +2546,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
   async pollAudioJob(apiBaseUrl: string, apiToken: string, jobId: string): Promise<JobStatusResponsePayload> {
     const startedAt = Date.now();
     let lastStatus: JobStatusResponsePayload["status"] | null = null;
+    let lastPhase: string | null = null;
 
     while (Date.now() - startedAt < AUDIO_POLL_TIMEOUT_MS) {
       const responseText = await this.performJsonRequest({
@@ -2460,9 +2565,10 @@ export default class LocalAiPlatformPlugin extends Plugin {
       });
 
       const payload = this.parseJobStatusResponse(responseText);
-      if (payload.status !== lastStatus) {
+      if (payload.status !== lastStatus || payload.phase !== lastPhase) {
         lastStatus = payload.status;
-        new Notice(formatJobStatusNotice(payload.status), 4000);
+        lastPhase = payload.phase;
+        new Notice(formatJobStatusNotice(payload), 4000);
       }
 
       if (payload.status === "completed") {
@@ -2471,11 +2577,105 @@ export default class LocalAiPlatformPlugin extends Plugin {
       if (payload.status === "failed") {
         throw new UserFacingError(payload.error || "The audio transcription job failed.");
       }
+      if (payload.status === "cancelled") {
+        throw new UserFacingError("The audio transcription job was cancelled.");
+      }
+      if (payload.stalled) {
+        throw new UserFacingError("La transcription ne donne plus de signe de vie. Elle reste visible dans le centre de taches.");
+      }
 
       await sleep(AUDIO_POLL_INTERVAL_MS);
     }
 
-    throw new UserFacingError("Audio transcription timed out.");
+    throw new UserFacingError("Le suivi local a expire, mais la transcription peut continuer sur le serveur. Consulte le centre de taches.");
+  }
+
+  async listAudioJobs(limit = 20): Promise<JobStatusResponsePayload[]> {
+    const responseText = await this.performJsonRequest({
+      apiBaseUrl: this.getApiBaseUrl(),
+      apiToken: this.getApiToken(),
+      path: `/v1/jobs?limit=${Math.max(1, Math.min(limit, 50))}`,
+      method: "GET",
+      errorMap: {
+        401: "Le token API est invalide ou expire.",
+        503: "Le centre de taches est indisponible.",
+      },
+      unavailableMessage: "Le centre de taches est inaccessible.",
+      invalidJsonMessage: "Le serveur a retourne un historique de taches invalide.",
+    });
+    const parsed = this.parseJson(responseText, "Le serveur a retourne un historique de taches invalide.");
+    if (!isJobListResponsePayload(parsed)) {
+      throw new UserFacingError("Le serveur a retourne un historique de taches invalide.");
+    }
+    return parsed.jobs;
+  }
+
+  async cancelAudioJob(jobId: string): Promise<JobCancelResponsePayload> {
+    const responseText = await this.performJsonRequest({
+      apiBaseUrl: this.getApiBaseUrl(),
+      apiToken: this.getApiToken(),
+      path: `/v1/jobs/${encodeURIComponent(jobId)}/cancel`,
+      method: "POST",
+      errorMap: {
+        401: "Le token API est invalide ou expire.",
+        404: "La tache de transcription est introuvable.",
+        503: "Le centre de taches est indisponible.",
+      },
+      unavailableMessage: "Le centre de taches est inaccessible.",
+      invalidJsonMessage: "Le serveur a retourne une confirmation d'annulation invalide.",
+    });
+    const parsed = this.parseJson(responseText, "Le serveur a retourne une confirmation d'annulation invalide.");
+    if (!isJobCancelResponsePayload(parsed)) {
+      throw new UserFacingError("Le serveur a retourne une confirmation d'annulation invalide.");
+    }
+    return parsed;
+  }
+
+  async resumeMeetingFromCompletedJob(job: JobStatusResponsePayload): Promise<TFile> {
+    if (job.status !== "completed") {
+      throw new UserFacingError("La transcription doit etre terminee avant de reprendre la creation du compte rendu.");
+    }
+    const activeNote = this.app.workspace.getActiveFile();
+    const initialNotes = activeNote?.extension === "md" ? await this.app.vault.read(activeNote) : "";
+    const fallbackName = job.display_name || `transcription-${job.job_id.slice(0, 8)}`;
+    const metadata = await promptForMeetingMetadata(this.app, {
+      initialTitle: activeNote?.extension === "md" ? activeNote.basename : stripFileExtension(fallbackName),
+      detectedManualNotes: initialNotes,
+      detectedSourceNoteFile: activeNote?.extension === "md" ? activeNote : undefined,
+      defaultOutputLanguage: this.getOutputLanguage(),
+    });
+    const templateChoice = await this.chooseTemplate("meeting_summary");
+    const generationMode = await chooseMeetingGenerationMode(this.app);
+    const transcriptResult = await this.requestJobResult(this.getApiBaseUrl(), this.getApiToken(), job.job_id);
+    this.ensureUsableTranscriptResult(transcriptResult);
+    const transcriptFile = await this.trySaveExternalAudioTranscriptToVault(
+      transcriptResult,
+      fallbackName,
+      metadata.sourceNoteFile,
+    );
+    new Notice(formatMeetingGenerationNotice(generationMode));
+    const response = await this.requestMeetingFromJob(this.getApiBaseUrl(), this.getApiToken(), {
+      job_id: job.job_id,
+      title: metadata.title,
+      manual_notes: metadata.manualNotes,
+      participants: [],
+      template: this.prepareTemplateForRequest(templateChoice, "meeting_summary"),
+      model: this.getDefaultModel(),
+      output_language: metadata.outputLanguage,
+      generation_mode: generationMode,
+    });
+    const outputFile = await this.writeMeetingNote({
+      response,
+      templateChoice,
+      sourceAudioName: fallbackName,
+      sourceNoteFile: metadata.sourceNoteFile,
+      transcriptFile,
+      transcriptResult,
+      generationMode,
+      outputLanguage: metadata.outputLanguage,
+    });
+    new Notice(`Compte rendu cree: ${outputFile.path}`);
+    return outputFile;
   }
 
   async performJsonRequest(input: {
@@ -3066,6 +3266,9 @@ class NoteCompagnonDashboardView extends ItemView {
   private lastVaultStats: VaultStatsResponsePayload | null = null;
   private assistantResponseMode: AssistantResponseMode = "simple";
   private progressRefreshTimer: number | null = null;
+  private jobRefreshTimer: number | null = null;
+  private jobListEl: HTMLElement | null = null;
+  private jobs: JobStatusResponsePayload[] = [];
 
   constructor(leaf: WorkspaceLeaf, plugin: LocalAiPlatformPlugin) {
     super(leaf);
@@ -3082,17 +3285,24 @@ class NoteCompagnonDashboardView extends ItemView {
 
   async onOpen(): Promise<void> {
     await this.render();
+    await this.refreshJobs(false);
+    await this.refreshRuntimeHealth(false);
     this.progressRefreshTimer = window.setInterval(() => {
       if (this.plugin.settings.dashboardVaultExpanded && ["scanning", "indexing"].includes(this.plugin.ragIndexProgress.state)) {
         void this.render();
       }
     }, 1000);
+    this.jobRefreshTimer = window.setInterval(() => void this.refreshJobs(false), 5000);
   }
 
   async onClose(): Promise<void> {
     if (this.progressRefreshTimer !== null) {
       window.clearInterval(this.progressRefreshTimer);
       this.progressRefreshTimer = null;
+    }
+    if (this.jobRefreshTimer !== null) {
+      window.clearInterval(this.jobRefreshTimer);
+      this.jobRefreshTimer = null;
     }
     this.contentEl.empty();
   }
@@ -3112,6 +3322,11 @@ class NoteCompagnonDashboardView extends ItemView {
       ["Ouvrir reunions", async () => this.plugin.openConfiguredFolder(this.plugin.getMeetingsFolder())],
       ["Ouvrir comptes rendus", async () => this.plugin.openConfiguredFolder(this.plugin.getOutputFolder())],
     ]);
+
+    container.createEl("h3", { text: "Centre de taches" });
+    this.addActionGrid(container, [["Actualiser", async () => this.refreshJobs(true)]]);
+    this.jobListEl = container.createDiv({ cls: "notre-compagnon-job-list" });
+    this.renderJobList();
 
     container.createEl("h3", { text: "Assistant" });
     const modeSetting = new Setting(container)
@@ -3187,6 +3402,12 @@ class NoteCompagnonDashboardView extends ItemView {
         await this.plugin.installRecommendedTemplates(installSet);
       }],
       ["Ouvrir templates", async () => this.plugin.openConfiguredFolder(this.plugin.getTemplatesFolder())],
+      ["Mettre a jour", async () => {
+        if (window.confirm("Mettre a jour les templates recommandes installes ? Une sauvegarde de chaque fichier modifie sera creee.")) {
+          await this.plugin.updateRecommendedTemplates();
+          await this.render();
+        }
+      }],
       [this.plugin.settings.dashboardTemplatesExpanded ? "Masquer les templates" : "Afficher les templates", async () => {
         this.plugin.settings.dashboardTemplatesExpanded = !this.plugin.settings.dashboardTemplatesExpanded;
         await this.plugin.saveSettings();
@@ -3252,8 +3473,16 @@ class NoteCompagnonDashboardView extends ItemView {
 
     container.createEl("h3", { text: "Etat" });
     const status = this.plugin.getConfigurationStatus();
-    this.addActionGrid(container, [["Tester", async () => this.plugin.testConnection()]]);
+    this.addActionGrid(container, [["Tester", async () => {
+      await this.plugin.testConnection();
+      await this.render();
+    }]]);
     new Setting(container).setName("Backend").setDesc(status.isReady ? "Configuration prete" : status.label);
+    if (this.plugin.runtimeHealth) {
+      new Setting(container)
+        .setName("Services reels")
+        .setDesc(Object.entries(this.plugin.runtimeHealth.components).map(([name, component]) => `${name}: ${component.status}`).join(" | "));
+    }
     this.addActionGrid(container, [[this.plugin.settings.dashboardStatusExpanded ? "Masquer les details" : "Afficher les details", async () => {
       this.plugin.settings.dashboardStatusExpanded = !this.plugin.settings.dashboardStatusExpanded;
       await this.plugin.saveSettings();
@@ -3291,6 +3520,109 @@ class NoteCompagnonDashboardView extends ItemView {
           this.plugin.showUserFacingError(error);
         }
       });
+    }
+  }
+
+  private async refreshJobs(showErrors: boolean): Promise<void> {
+    if (!this.plugin.getConfigurationStatus().isReady) {
+      return;
+    }
+    try {
+      this.jobs = await this.plugin.listAudioJobs(20);
+      this.renderJobList();
+    } catch (error) {
+      if (showErrors) {
+        this.plugin.showUserFacingError(error);
+      } else {
+        console.debug("Note Compagnon job center refresh failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  private async refreshRuntimeHealth(showErrors: boolean): Promise<void> {
+    if (!this.plugin.getConfigurationStatus().isReady) {
+      return;
+    }
+    try {
+      await this.plugin.getRuntimeHealth();
+      await this.render();
+    } catch (error) {
+      if (showErrors) {
+        this.plugin.showUserFacingError(error);
+      }
+    }
+  }
+
+  private renderJobList(): void {
+    if (!this.jobListEl) {
+      return;
+    }
+    this.jobListEl.empty();
+    if (this.jobs.length === 0) {
+      this.jobListEl.createEl("p", { text: "Aucune transcription recente." });
+      return;
+    }
+
+    for (const job of this.jobs) {
+      const box = this.jobListEl.createDiv({ cls: "notre-compagnon-job" });
+      box.style.border = "1px solid var(--background-modifier-border)";
+      box.style.borderRadius = "8px";
+      box.style.padding = "8px";
+      box.style.margin = "8px 0";
+      const title = job.display_name || `Transcription ${job.job_id.slice(0, 8)}`;
+      box.createEl("strong", { text: title });
+      const state = job.stalled ? "bloquee (heartbeat absent)" : formatJobStatusLabel(job.status);
+      box.createEl("div", { text: `${state} | ${job.phase} | ${job.progress} % | tentative ${job.attempts}` });
+      if (job.progress_message) {
+        box.createEl("div", { text: job.progress_message });
+      }
+      const barOuter = box.createDiv();
+      barOuter.style.height = "7px";
+      barOuter.style.background = "var(--background-modifier-border)";
+      barOuter.style.borderRadius = "999px";
+      barOuter.style.overflow = "hidden";
+      barOuter.style.margin = "6px 0";
+      const barInner = barOuter.createDiv();
+      barInner.style.height = "100%";
+      barInner.style.width = `${Math.max(0, Math.min(job.progress, 100))}%`;
+      barInner.style.background = job.status === "failed" || job.stalled ? "var(--text-error)" : "var(--interactive-accent)";
+      const date = new Date(job.created_at);
+      box.createEl("small", { text: `${Number.isNaN(date.getTime()) ? job.created_at : date.toLocaleString()} | ${job.job_id}` });
+
+      const controls = box.createDiv();
+      controls.style.display = "flex";
+      controls.style.flexWrap = "wrap";
+      controls.style.gap = "6px";
+      controls.style.marginTop = "6px";
+      if (["queued", "processing"].includes(job.status)) {
+        const cancelButton = controls.createEl("button", { text: job.cancel_requested ? "Annulation demandee" : "Annuler" });
+        cancelButton.disabled = job.cancel_requested;
+        cancelButton.addEventListener("click", async () => {
+          try {
+            await this.plugin.cancelAudioJob(job.job_id);
+            await this.refreshJobs(true);
+          } catch (error) {
+            this.plugin.showUserFacingError(error);
+          }
+        });
+      }
+      if (job.status === "completed") {
+        const resumeButton = controls.createEl("button", { text: "Creer / reprendre le CR" });
+        resumeButton.addEventListener("click", async () => {
+          try {
+            await this.plugin.resumeMeetingFromCompletedJob(job);
+          } catch (error) {
+            this.plugin.showUserFacingError(error);
+          }
+        });
+      }
+      if (job.error) {
+        const details = box.createEl("details");
+        details.createEl("summary", { text: "Erreur" });
+        details.createEl("pre", { text: job.error });
+      }
     }
   }
 
@@ -3477,7 +3809,31 @@ class NoteCompagnonDashboardView extends ItemView {
         choice.description,
         choice.sourcePath,
       ].filter((item): item is string => Boolean(item));
-      new Setting(container).setName(choice.label).setDesc(details.join(" | "));
+      const recommendedName = choice.sourcePath?.split("/").pop() || "";
+      const isRecommended = RECOMMENDED_TEMPLATES.some((template) => template.fileName === recommendedName);
+      const versionLabel = isRecommended
+        ? `version: ${choice.version ?? "ancienne"}/${RECOMMENDED_TEMPLATE_VERSION}`
+        : choice.version ? `version: ${choice.version}` : "template personnel";
+      const setting = new Setting(container).setName(choice.label).setDesc([...details, versionLabel].join(" | "));
+      setting.addButton((button) => button.setButtonText("Ouvrir").onClick(async () => {
+        const file = choice.sourcePath ? this.app.vault.getAbstractFileByPath(choice.sourcePath) : null;
+        if (file instanceof TFile) {
+          await this.app.workspace.getLeaf(true).openFile(file);
+        }
+      }));
+      setting.addButton((button) => button.setButtonText("Dupliquer").onClick(async () => {
+        await this.plugin.duplicateTemplate(choice);
+        await this.render();
+      }));
+      const preview = container.createEl("details");
+      preview.createEl("summary", { text: `Apercu et verification — ${choice.label}` });
+      preview.createEl("div", {
+        text: choice.templateContent.trim().length >= 40
+          ? "Template valide : contenu exploitable detecte."
+          : "Attention : contenu trop court, le fallback sera probablement utilise.",
+      });
+      const pre = preview.createEl("pre", { text: choice.templateContent.slice(0, 4000) });
+      pre.style.whiteSpace = "pre-wrap";
     }
   }
 
@@ -3800,6 +4156,13 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
   renderAudioSettings(containerEl: HTMLElement): void {
     containerEl.createEl("h3", { text: "Audio de reunion" });
     new Setting(containerEl)
+      .setName("Identifier les intervenants (GPU)")
+      .setDesc("Ajoute Speaker 1, Speaker 2, etc. Cette etape est plus lente et reserve temporairement le GPU : Ollama attendra sa fin.")
+      .addToggle((toggle) => toggle.setValue(this.plugin.settings.diarizationEnabled).onChange(async (value) => {
+        this.plugin.settings.diarizationEnabled = value;
+        await this.plugin.saveSettings();
+      }));
+    new Setting(containerEl)
       .setName("Mode d'enregistrement")
       .setDesc("Pour Teams, utilise de preference Micro + son ordinateur avec Microphone = ton micro et Son ordinateur = Mixage stereo.")
       .addDropdown((dropdown) =>
@@ -3963,6 +4326,10 @@ class TemplatePickerModal extends Modal {
             this.close();
           }),
         );
+        const preview = contentEl.createEl("details");
+        preview.createEl("summary", { text: `Apercu — ${choice.label}` });
+        const pre = preview.createEl("pre", { text: choice.templateContent.slice(0, 4000) });
+        pre.style.whiteSpace = "pre-wrap";
       }
     }
   }
@@ -4301,6 +4668,22 @@ function isModelsResponsePayload(value: unknown): value is ModelsResponsePayload
   return Array.isArray(candidate.models) && candidate.models.every((item) => typeof item === "string");
 }
 
+function isRuntimeHealthResponsePayload(value: unknown): value is RuntimeHealthResponsePayload {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<RuntimeHealthResponsePayload>;
+  if (candidate.status !== "ok" && candidate.status !== "degraded") {
+    return false;
+  }
+  if (typeof candidate.components !== "object" || candidate.components === null) {
+    return false;
+  }
+  return Object.values(candidate.components).every(
+    (component) => typeof component === "object" && component !== null && (component.status === "up" || component.status === "down"),
+  );
+}
+
 function isAudioJobQueuedResponsePayload(value: unknown): value is AudioJobQueuedResponsePayload {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -4318,10 +4701,39 @@ function isJobStatusResponsePayload(value: unknown): value is JobStatusResponseP
   const candidate = value as Partial<JobStatusResponsePayload>;
   return (
     typeof candidate.job_id === "string" &&
-    typeof candidate.status === "string" &&
+    ["queued", "processing", "completed", "failed", "cancelled"].includes(candidate.status || "") &&
+    typeof candidate.type === "string" &&
+    typeof candidate.phase === "string" &&
+    typeof candidate.progress === "number" &&
+    candidate.progress >= 0 &&
+    candidate.progress <= 100 &&
+    (typeof candidate.progress_message === "string" || candidate.progress_message === null) &&
+    typeof candidate.attempts === "number" &&
+    typeof candidate.stalled === "boolean" &&
+    typeof candidate.cancel_requested === "boolean" &&
     typeof candidate.created_at === "string" &&
     typeof candidate.updated_at === "string" &&
     (typeof candidate.error === "string" || candidate.error === null)
+  );
+}
+
+function isJobListResponsePayload(value: unknown): value is JobListResponsePayload {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<JobListResponsePayload>;
+  return Array.isArray(candidate.jobs) && candidate.jobs.every(isJobStatusResponsePayload);
+}
+
+function isJobCancelResponsePayload(value: unknown): value is JobCancelResponsePayload {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<JobCancelResponsePayload>;
+  return (
+    typeof candidate.job_id === "string" &&
+    ["queued", "processing", "completed", "failed", "cancelled"].includes(candidate.status || "") &&
+    typeof candidate.cancel_requested === "boolean"
   );
 }
 
@@ -4705,24 +5117,25 @@ function sanitizeFileName(input: string): string {
 }
 
 function parseTemplateContent(content: string): {
-  metadata: { name: string | null; language: string | null; type: string | null; description: string | null };
+  metadata: { name: string | null; language: string | null; type: string | null; description: string | null; version: number | null };
   body: string;
 } {
   const normalized = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
   const frontmatterMatch = normalized.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
   if (!frontmatterMatch) {
     return {
-      metadata: { name: null, language: null, type: null, description: null },
+      metadata: { name: null, language: null, type: null, description: null, version: null },
       body: normalized,
     };
   }
   const frontmatter = frontmatterMatch[1];
   const body = stripLegacyTemplateOutputFrontmatter(normalized.slice(frontmatterMatch[0].length));
-  const metadata = { name: null, language: null, type: null, description: null } as {
+  const metadata = { name: null, language: null, type: null, description: null, version: null } as {
     name: string | null;
     language: string | null;
     type: string | null;
     description: string | null;
+    version: number | null;
   };
 
   for (const line of frontmatter.split(/\r?\n/)) {
@@ -4734,10 +5147,24 @@ function parseTemplateContent(content: string): {
     const value = line.slice(separatorIndex + 1).trim().replace(/^["']|["']$/g, "");
     if (key === "name" || key === "language" || key === "type" || key === "description") {
       metadata[key] = value || null;
+    } else if (key === "note_compagnon_version") {
+      const version = Number(value);
+      metadata.version = Number.isFinite(version) ? version : null;
     }
   }
 
   return { metadata, body };
+}
+
+function addRecommendedTemplateVersion(content: string): string {
+  const normalized = content.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---\n")) {
+    return normalized;
+  }
+  if (/^note_compagnon_version:/m.test(normalized)) {
+    return normalized.replace(/^note_compagnon_version:.*$/m, `note_compagnon_version: ${RECOMMENDED_TEMPLATE_VERSION}`);
+  }
+  return normalized.replace(/^---\n/, `---\nnote_compagnon_version: ${RECOMMENDED_TEMPLATE_VERSION}\n`);
 }
 
 function stripLegacyTemplateOutputFrontmatter(content: string): string {
@@ -4960,7 +5387,7 @@ function buildGenerationIntent(templateChoice: TemplateChoice, purpose: Template
       "Mode : actions uniquement.",
       "Retourner seulement les actions confirmees par les sources.",
       "Ne pas ajouter de resume, contexte, decisions ou sections vides.",
-      "Format simple : Action | Responsable si connu | Echeance si connue.",
+      "Format Obsidian Tasks : - [ ] Action concrete — @Responsable 📅 YYYY-MM-DD. Omettre les champs inconnus.",
     ].join("\n");
   }
   if (templateChoice.group === "technical") {
@@ -5226,11 +5653,20 @@ function createAudioHelpFragment(): DocumentFragment {
   return fragment;
 }
 
-function formatJobStatusNotice(status: JobStatusResponsePayload["status"]): string {
-  if (status === "queued") return "Transcription queued.";
-  if (status === "processing") return "Transcription processing.";
-  if (status === "completed") return "Transcription completed.";
-  return "Transcription failed.";
+function formatJobStatusNotice(job: JobStatusResponsePayload): string {
+  if (job.status === "queued") return "Transcription en attente.";
+  if (job.status === "processing") return `${job.progress_message || "Transcription en cours."} (${job.progress} %)`;
+  if (job.status === "completed") return "Transcription terminee.";
+  if (job.status === "cancelled") return "Transcription annulee.";
+  return "La transcription a echoue.";
+}
+
+function formatJobStatusLabel(status: JobStatusResponsePayload["status"]): string {
+  if (status === "queued") return "en attente";
+  if (status === "processing") return "en cours";
+  if (status === "completed") return "terminee";
+  if (status === "cancelled") return "annulee";
+  return "echec";
 }
 
 function buildSummaryNote(input: {

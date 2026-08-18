@@ -3,29 +3,27 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ai-gateway"
+name = "obsidian-diarization-service"
 version = "0.1.0"
-description = "Minimal FastAPI gateway bootstrap for obsidian-local-ai-platform"
 requires-python = ">=3.11"
 dependencies = [
-  "alembic>=1.14,<2.0",
   "fastapi>=0.115,<1.0",
   "httpx>=0.27,<1.0",
   "pydantic-settings>=2.6,<3.0",
   "python-multipart>=0.0.9,<1.0",
-  "redis>=5.0,<6.0",
-  "sqlalchemy>=2.0,<3.0",
   "uvicorn[standard]>=0.30,<1.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-  "pytest>=8.0,<9.0",
+gpu = [
+  "huggingface-hub<=0.23.5",
+  "pyannote.audio==3.3.2",
 ]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+dev = ["pytest>=8,<9"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["app*"]
+include = ["diarization_service*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

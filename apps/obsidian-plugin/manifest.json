@@ -1,7 +1,7 @@
 {
   "id": "obsidian-local-ai-platform",
   "name": "Note Compagnon",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "minAppVersion": "1.5.0",
   "description": "Private meeting companion for Obsidian.",
   "author": "Antonin",

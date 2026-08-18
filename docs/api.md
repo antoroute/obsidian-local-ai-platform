@@ -18,6 +18,25 @@ Example response:
 }
 ```
 
+This public liveness endpoint deliberately confirms only that the gateway process
+is running. It is suitable for the container healthcheck and reveals no dependency
+details.
+
+### `GET /v1/health/ready`
+
+Authenticated readiness endpoint. It distinguishes the database, Redis, Whisper
+worker heartbeat, actual Ollama API, and optional diarization coordinator. The
+overall status is `ok` only when every configured component is available.
+
+Requires a valid API Bearer token; no additional scope is needed.
+
+### `GET /metrics`
+
+Prometheus text endpoint protected by the dedicated `METRICS_TOKEN`, not by a user
+API token. It returns `404` when metrics are disabled. Send
+`Authorization: Bearer <metrics token>`. Metrics cover component availability,
+queue depth, jobs by status, and stalled jobs; they contain no note or transcript.
+
 ### `GET /v1/models`
 
 Protected endpoint returning the currently allowed model list for the caller.
@@ -334,8 +353,6 @@ RAG error behavior:
 - `503 Service Unavailable` when `RAG_ENABLED=false` or embeddings are unavailable
 - `502 Bad Gateway` when the embedding or LLM backend returns an invalid response
 
-## Planned endpoints
-
 ## Future realtime endpoint
 
 - `WS /v1/live/transcribe`
@@ -383,6 +400,8 @@ Behavior:
 - enforces `MAX_TRANSCRIPT_CHARS`, `MAX_MANUAL_NOTES_CHARS`, `MAX_TEMPLATE_CHARS`, and `MAX_PARTICIPANTS`
 - uses manual notes as the priority source for names, acronyms, dates, decisions, and actions
 - uses the transcript as the primary source for chronology and discussion flow
+- splits long transcripts into bounded chronological pre-digests, then produces one final report
+- formats confirmed actions as Obsidian Tasks (`- [ ] Action — @Owner 📅 YYYY-MM-DD`); unknown owner or date is omitted
 - instructs the model not to invent, to flag uncertainties, and to identify contradictions between notes and transcript
 
 Example response:
@@ -498,6 +517,7 @@ Accepted upload field:
 
 - multipart field named `file`
 - optional multipart field `transcription_language`, one of `auto`, `fr`, or `en`; default is `auto`
+- optional multipart field `diarization_enabled`, `true` or `false`; default is `false`
 
 Accepted extensions:
 
@@ -512,6 +532,7 @@ Behavior:
 - stores the uploaded file under `AUDIO_STORAGE_DIR`
 - enforces `MAX_AUDIO_UPLOAD_MB`
 - stores the requested transcription language in job metadata for the worker
+- uses CPU Whisper first, then optional GPU diarization; diarization failure does not discard a valid transcript
 - creates a queued job in the database
 - pushes the job id into Redis queue `audio_transcription_jobs`
 
@@ -540,7 +561,17 @@ Example response:
 ```json
 {
   "job_id": "1f79508f-8e0d-4c68-b6f8-8f7b891bcb2f",
-  "status": "queued",
+  "status": "processing",
+  "phase": "transcribing",
+  "progress": 42.5,
+  "progress_message": "Transcription audio",
+  "attempts": 1,
+  "stalled": false,
+  "display_name": "reunion-projet.webm",
+  "heartbeat_at": "2026-08-18T12:00:05+00:00",
+  "started_at": "2026-08-18T12:00:01+00:00",
+  "completed_at": null,
+  "cancel_requested_at": null,
   "created_at": "2026-05-23T12:00:00+00:00",
   "updated_at": "2026-05-23T12:00:00+00:00",
   "error": null
@@ -551,6 +582,22 @@ Error behavior:
 
 - `401 Unauthorized` when the bearer token is missing or invalid
 - `404 Not Found` when the job does not exist or is not owned by the current token user
+
+Statuses are `queued`, `processing`, `completed`, `failed`, and `cancelled`.
+Cancellation is cooperative while processing: the worker checks it between
+transcription segments and before optional diarization.
+
+### `GET /v1/jobs`
+
+Protected endpoint returning the current user's newest jobs. The optional `limit`
+query is bounded by the server. It uses the same safe lifecycle shape as the
+single-job endpoint and never exposes storage paths.
+
+### `POST /v1/jobs/{job_id}/cancel`
+
+Protected, idempotent cancellation endpoint. A queued job is cancelled immediately;
+a processing job receives `cancel_requested_at` and stops at its next safe checkpoint.
+Completed, failed, or already cancelled jobs keep their terminal state.
 
 ### `GET /v1/jobs/{job_id}/result`
 
@@ -605,6 +652,8 @@ The gateway therefore supports `OPTIONS` preflight requests for the implemented 
 - `/v1/notes/summarize`
 - `/v1/audio/transcribe`
 - `/v1/jobs/{job_id}`
+- `/v1/jobs`
+- `/v1/jobs/{job_id}/cancel`
 - `/v1/jobs/{job_id}/result`
 - `/v1/meetings/generate`
 - `/v1/meetings/generate-from-job`
@@ -626,5 +675,6 @@ Important:
 ## Typical audio-to-meeting workflow
 
 1. `POST /v1/audio/transcribe`
-2. poll `GET /v1/jobs/{job_id}` until `status=completed`
-3. `POST /v1/meetings/generate-from-job` with the finished `job_id`, template, and optional manual notes
+2. follow it in the plugin job center or poll `GET /v1/jobs/{job_id}`
+3. optionally cancel it with `POST /v1/jobs/{job_id}/cancel`
+4. after completion, call `POST /v1/meetings/generate-from-job` with the `job_id`, template, and optional manual notes

@@ -6,22 +6,45 @@ import logging
 from pathlib import Path
 import subprocess
 import tempfile
-from typing import Any
+from typing import Any, Callable
 
 from whisper_worker.config import WorkerSettings
-from whisper_worker.repositories import TranscriptResult, TranscriptSegment
+from whisper_worker.repositories import TranscriptResult, TranscriptSegment, TranscriptWord
 
 logger = logging.getLogger(__name__)
 
+ProgressCallback = Callable[[str, int, str], None]
+CancellationCheck = Callable[[], bool]
+
+
+class TranscriptionCancelled(RuntimeError):
+    pass
+
 
 class TranscriptionEngine:
-    def transcribe(self, input_path: Path, *, transcription_language: str | None = None) -> TranscriptResult:
+    def transcribe(
+        self,
+        input_path: Path,
+        *,
+        transcription_language: str | None = None,
+        progress_callback: ProgressCallback | None = None,
+        cancellation_check: CancellationCheck | None = None,
+    ) -> TranscriptResult:
         raise NotImplementedError
 
 
 class FakeTranscriptionEngine(TranscriptionEngine):
-    def transcribe(self, input_path: Path, *, transcription_language: str | None = None) -> TranscriptResult:
+    def transcribe(
+        self,
+        input_path: Path,
+        *,
+        transcription_language: str | None = None,
+        progress_callback: ProgressCallback | None = None,
+        cancellation_check: CancellationCheck | None = None,
+    ) -> TranscriptResult:
         del input_path
+        _raise_if_cancelled(cancellation_check)
+        _report_progress(progress_callback, "transcribing", 85, "Transcribing audio.")
         language = _resolve_fake_language(transcription_language)
         return TranscriptResult(
             text="Fake transcript for testing.",
@@ -47,25 +70,45 @@ class FasterWhisperEngine(TranscriptionEngine):
         self._default_language = default_language
         self._beam_size = beam_size
 
-    def transcribe(self, input_path: Path, *, transcription_language: str | None = None) -> TranscriptResult:
+    def transcribe(
+        self,
+        input_path: Path,
+        *,
+        transcription_language: str | None = None,
+        progress_callback: ProgressCallback | None = None,
+        cancellation_check: CancellationCheck | None = None,
+    ) -> TranscriptResult:
         if not input_path.exists():
             raise FileNotFoundError("Audio input file is missing.")
 
+        _raise_if_cancelled(cancellation_check)
+        _report_progress(progress_callback, "normalizing", 10, "Normalizing audio to mono 16 kHz.")
         language = _resolve_faster_whisper_language(transcription_language, self._default_language)
         with normalize_audio_for_whisper(input_path) as whisper_input_path:
+            _raise_if_cancelled(cancellation_check)
+            _report_progress(progress_callback, "transcribing", 15, "Loading Whisper and starting transcription.")
             segments_iterable, info = self._model.transcribe(
                 str(whisper_input_path),
                 language=language,
                 beam_size=self._beam_size,
                 vad_filter=True,
                 condition_on_previous_text=False,
+                word_timestamps=True,
             )
             # faster-whisper returns a lazy generator. Consume it while the
-            # normalized temporary WAV still exists.
-            segments = list(segments_iterable)
+            # normalized temporary WAV still exists and expose useful progress.
+            duration = float(getattr(info, "duration", 0) or 0)
+            segments = []
+            for segment in segments_iterable:
+                _raise_if_cancelled(cancellation_check)
+                segments.append(segment)
+                segment_end = float(getattr(segment, "end", 0) or 0)
+                fraction = min(1.0, segment_end / duration) if duration > 0 else 0.0
+                progress = 15 + int(fraction * 70)
+                _report_progress(progress_callback, "transcribing", progress, "Transcribing audio.")
         text = " ".join(segment.text.strip() for segment in segments if getattr(segment, "text", "").strip()).strip()
         result_language = getattr(info, "language", None) or language or "unknown"
-        duration = float(getattr(info, "duration", 0) or 0)
+        _report_progress(progress_callback, "validating", 90, "Validating the transcript.")
 
         return TranscriptResult(
             text=text,
@@ -76,10 +119,29 @@ class FasterWhisperEngine(TranscriptionEngine):
                     start=float(segment.start),
                     end=float(segment.end),
                     text=str(segment.text).strip(),
+                    words=[
+                        TranscriptWord(
+                            start=float(word.start),
+                            end=float(word.end),
+                            text=str(word.word).strip(),
+                        )
+                        for word in (getattr(segment, "words", None) or [])
+                        if getattr(word, "start", None) is not None and getattr(word, "end", None) is not None
+                    ],
                 )
                 for segment in segments
             ],
         )
+
+
+def _report_progress(callback: ProgressCallback | None, phase: str, progress: int, message: str) -> None:
+    if callback is not None:
+        callback(phase, progress, message)
+
+
+def _raise_if_cancelled(cancellation_check: CancellationCheck | None) -> None:
+    if cancellation_check is not None and cancellation_check():
+        raise TranscriptionCancelled("Transcription cancelled by the user.")
 
 
 @contextmanager

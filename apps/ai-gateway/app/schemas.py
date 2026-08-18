@@ -17,6 +17,15 @@ class HealthResponse(BaseModel):
     status: str
 
 
+class ReadinessComponentResponse(BaseModel):
+    status: Literal["up", "down"]
+
+
+class ReadinessResponse(BaseModel):
+    status: Literal["ok", "degraded"]
+    components: dict[str, ReadinessComponentResponse]
+
+
 class ModelsResponse(BaseModel):
     models: list[str]
 
@@ -109,9 +118,30 @@ class AudioTranscriptionQueuedResponse(BaseModel):
 class JobStatusResponse(BaseModel):
     job_id: str
     status: str
+    type: str
+    display_name: str | None = None
+    phase: str
+    progress: int
+    progress_message: str | None
+    attempts: int
+    stalled: bool = False
+    cancel_requested: bool = False
     created_at: str
     updated_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    heartbeat_at: str | None = None
     error: str | None
+
+
+class JobListResponse(BaseModel):
+    jobs: list[JobStatusResponse]
+
+
+class JobCancelResponse(BaseModel):
+    job_id: str
+    status: str
+    cancel_requested: bool
 
 
 class TranscriptSegmentResponse(BaseModel):

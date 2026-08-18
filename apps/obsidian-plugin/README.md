@@ -67,7 +67,8 @@ The dashboard is an action page with compact sections:
 - `Assistant`: chat with Note Compagnon, then insert or copy a real Markdown-rendered answer
 - `Connaissance du vault`: explicit RAG indexing, stats, deletion, and vault question support
 - `Templates`: install/open templates, with detailed template metadata hidden by default
-- `Etat`: backend status and test button, with details hidden by default
+- `Centre de taches`: recent transcriptions, live phase/progress, cancellation, errors, and report recovery after an Obsidian restart
+- `Etat`: real gateway, database, Redis, worker, Ollama, and diarization status
 
 The `Reunion` section keeps these daily actions visible: `Demarrer reunion`, `Arreter + CR`, `Depuis audio`, `Resumer note`, `Ouvrir reunions`, and `Ouvrir comptes rendus`.
 
@@ -217,7 +218,10 @@ The dashboard installer offers:
 - English only
 - all templates
 
-Existing templates are skipped and never overwritten automatically.
+Existing templates are skipped during a normal installation. Recommended templates
+carry a `note_compagnon_version`; the dashboard can preview them and explicitly
+update an old template after confirmation. The previous file is backed up inside
+the vault before replacement. Custom templates are never silently overwritten.
 
 Recommended meeting-summary templates are intentionally short. They guide the model toward a direct useful report with five core blocks: summary, decisions, actions, open points, and uncertainties. Empty sections should be removed by the model instead of filled with generic text such as "no information available".
 
@@ -286,6 +290,7 @@ Limits:
 - if Teams audio is in headphones, a normal microphone may not capture other participants clearly
 - direct global computer-audio capture is not promised unless Windows exposes an input device or Obsidian/Electron provides an audio track
 - optional local diarization can label anonymous speakers as `Speaker 1`, `Speaker 2`, etc. when enabled on the worker
+- diarization is disabled by default because it temporarily takes exclusive control of the RTX 2070 and can be slower than transcription
 
 Recorded audio remains in your vault under `Recordings folder`. After Whisper finishes, Note Compagnon also writes a readable `- transcript.md` file in the same folder and links it from the meeting note and final minutes. If diarization is enabled and succeeds, transcript lines use `Speaker N [hh:mm:ss]: text`; otherwise the plugin keeps the timestamp-only format.
 Tell participants before recording a meeting.
@@ -326,6 +331,7 @@ The final note should contain the polished minutes only. It should not include t
 - `403` on audio upload: token missing `audio:transcribe`
 - `403` on meeting generation: token missing `meetings:generate` or model refused
 - `502` or `503`: model, Ollama, or gateway backend unavailable
+- job marked `stalled`: the worker heartbeat or job heartbeat stopped; keep the job in history while checking services
 - No selected text: select text in a note, then use command palette or right-click
 
 ## Manual Test Checklist

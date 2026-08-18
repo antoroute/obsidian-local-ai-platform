@@ -244,6 +244,32 @@ def test_meeting_generate_long_transcript_uses_predigest(client: TestClient, mon
     assert "Decision candidate: conserver le budget" in fake_client.user_prompts[0]
 
 
+def test_meeting_generate_very_long_transcript_uses_bounded_chronological_chunks(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("MEETING_PREDIGEST_MIN_CHARS", "50")
+    monkeypatch.setenv("MEETING_PREDIGEST_CHUNK_CHARS", "4000")
+    monkeypatch.setenv("MEETING_PREDIGEST_MAX_CHUNKS", "3")
+    get_settings.cache_clear()
+    fake_client = FakeMeetingOllamaClient()
+    app.dependency_overrides[get_llm_client] = lambda: fake_client
+    token = create_token(["meetings:generate"])
+
+    response = client.post(
+        "/v1/meetings/generate",
+        headers=create_bearer_header(token),
+        json=valid_payload(transcript=("Decision budget avec contexte detaille. " * 350)),
+    )
+
+    app.dependency_overrides.clear()
+    get_settings.cache_clear()
+
+    assert response.status_code == 200
+    assert len(fake_client.predigest_user_prompts) == 3
+    assert response.json()["generation_stages"] == 4
+    assert response.json()["generation_analysis"]["sections_count"] == 3
+    assert "Chronological part: 1/3" in fake_client.predigest_user_prompts[0]
+    assert "Chronological part: 3/3" in fake_client.predigest_user_prompts[2]
+
+
 def test_meeting_generate_deep_think_uses_section_calls(client: TestClient, monkeypatch) -> None:
     monkeypatch.setenv("MEETING_DEEP_THINK_MAX_SECTIONS", "3")
     monkeypatch.setenv("MEETING_DEEP_THINK_EXCERPT_CHARS_PER_SECTION", "500")

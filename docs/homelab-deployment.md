@@ -1,8 +1,8 @@
 # Déploiement sur le homelab
 
-Ce document décrit la cible préparée pour le homelab Kavalek. Il ne constitue pas
-encore l'autorisation de déployer : les changements Portainer, Nginx Proxy Manager,
-DNS et pare-feu seront réalisés et vérifiés pendant la phase 3.
+Ce document décrit la cible du homelab Kavalek et sa procédure de mise à jour
+progressive. Sauvegarder les données et valider chaque étape avant de passer à la
+suivante.
 
 ## Architecture cible
 
@@ -12,14 +12,18 @@ flowchart LR
     N -->|HTTP, réseau interne| G[AI gateway<br/>10.0.20.20:18000]
     G --> P[(PostgreSQL + pgvector)]
     G --> R[(Redis)]
-    G -->|requêtes sérialisées| L[Ollama existant<br/>10.0.70.10:11434<br/>RTX 2070 8 Go]
+    G -->|requêtes sérialisées| C[Coordinateur GPU<br/>10.0.70.10:18080]
+    C -->|verrou GPU| L[Ollama existant<br/>10.0.70.10:11434<br/>RTX 2070 8 Go]
     R --> W[Whisper worker<br/>CPU, small/int8]
     W --> P
+    W -->|audio, opt-in + Bearer privé| C
+    C -->|verrou GPU| D[pyannote 3.1<br/>chargé à la demande]
 ```
 
 La stack dédiée est [infra/docker-compose.homelab.yml](../infra/docker-compose.homelab.yml).
 Elle ne déploie ni Ollama ni un reverse proxy : elle utilise les services déjà
-présents dans l'infrastructure.
+présents. [infra/docker-compose.gpu-services.yml](../infra/docker-compose.gpu-services.yml)
+déploie séparément le coordinateur sur la VM GPU.
 
 Seul le gateway publie un port, lié par défaut à `10.0.20.20:18000`. PostgreSQL,
 Redis et le worker restent sur un réseau Docker interne. Ollama reste accessible
@@ -33,7 +37,7 @@ ni le LXC Docker :
 
 - génération : `qwen3:8b`, seul modèle autorisé par défaut ;
 - embeddings : `qwen3-embedding:0.6b`, dimension vérifiée à `1024` ;
-- contexte Ollama limité à `8192` tokens ;
+- contexte Ollama limité à `16384` tokens ;
 - un seul appel Ollama simultané pour partager proprement le GPU avec Open WebUI ;
 - modèle conservé cinq minutes après la dernière requête, puis libérable par Ollama ;
 - transcription sur CPU avec faster-whisper `small`, calcul `int8`, deux threads et
@@ -41,16 +45,20 @@ ni le LXC Docker :
 - limites Docker : gateway 1 CPU/1 Gio, worker 2 CPU/4 Gio, PostgreSQL 1 CPU/1,5 Gio,
   Redis 0,5 CPU/256 Mio.
 
-Le choix CPU pour Whisper est intentionnel : la RTX 2070 est passée exclusivement
-à la VM Ollama et n'est pas disponible dans le LXC Docker.
+Le choix CPU pour Whisper est intentionnel : la RTX 2070 n'est disponible que dans
+la VM Ollama. La diarisation est désactivée par défaut dans le plugin. Lorsqu'elle
+est demandée, le coordinateur décharge Ollama, prend un verrou GPU exclusif, charge
+pyannote, puis libère immédiatement modèle et cache CUDA.
 
 ## Images et GitOps
 
 Le workflow [`.github/workflows/ci-images.yml`](../.github/workflows/ci-images.yml)
-teste les trois composants. Après intégration sur `main`, il construit et publie :
+teste le plugin et les trois services Python. Après intégration sur `main`, il
+construit et publie :
 
 - `ghcr.io/antoroute/obsidian-local-ai-platform-ai-gateway:main` ;
 - `ghcr.io/antoroute/obsidian-local-ai-platform-whisper-worker:main`.
+- `ghcr.io/antoroute/obsidian-local-ai-platform-diarization-service:main`.
 
 Chaque image reçoit également un tag immuable `sha-...`. La stack utilise `main`
 pour les mises à jour automatiques ; un tag SHA peut être utilisé pour revenir à
@@ -82,7 +90,7 @@ chiffres, `_` et `-`, puisqu'il est injecté dans l'URL SQLAlchemy.
 Ne jamais committer le fichier réel. Avant le déploiement, vérifier notamment :
 
 - `GATEWAY_BIND_ADDRESS=10.0.20.20` ;
-- `OLLAMA_BASE_URL=http://10.0.70.10:11434` ;
+- `OLLAMA_BASE_URL=http://10.0.70.10:18080/ollama` ;
 - `DEFAULT_MODEL` et `ALLOWED_MODELS` limités à `qwen3:8b` ;
 - `RAG_EMBEDDING_MODEL=qwen3-embedding:0.6b` ;
 - `RAG_EMBEDDING_DIMENSION=1024` ;
@@ -92,7 +100,42 @@ Ne jamais committer le fichier réel. Avant le déploiement, vérifier notamment
 - `DAILY_EMBEDDING_REQUESTS_PER_USER=5000` ;
 - `DAILY_AUDIO_JOBS_PER_USER=20` ;
 - `MAX_ACTIVE_AUDIO_JOBS_PER_USER=1` ;
-- `WHISPER_MODEL_SIZE=small`.
+- `WHISPER_MODEL_SIZE=small` ;
+- deux secrets distincts et aléatoires dans `METRICS_TOKEN` et
+  `DIARIZATION_SERVICE_TOKEN` ;
+- le même `DIARIZATION_SERVICE_TOKEN` sur le worker et le coordinateur GPU.
+
+## Coordinateur GPU et diarisation
+
+La VM `10.0.70.10` exécute Ollama nativement et le coordinateur dans Docker avec
+`network_mode: host`. Le pare-feu doit autoriser TCP/18080 uniquement depuis le LXC
+Docker, VM112, VM121 et les hôtes de supervision explicitement nécessaires. Tous
+les consommateurs utilisent `http://10.0.70.10:18080/ollama`; les accès entrants
+directs à TCP/11434 sont ensuite supprimés. Ainsi, le verrou couvre aussi Open
+WebUI et Hermes, pas seulement Obsidian AI. Aucun de ces deux ports ne doit être
+exposé publiquement.
+
+Le modèle par défaut reste `pyannote/speaker-diarization-3.1`. Il est plus prudent
+sur une RTX 2070 8 Go que Community-1 avec les versions actuelles de pyannote. Son
+téléchargement nécessite un compte Hugging Face, l'acceptation des conditions du
+modèle et un token en lecture. Le secret n'est utilisé que pour le préchargement.
+
+```bash
+docker compose --env-file .env.gpu \
+  -f infra/docker-compose.gpu-services.yml build gpu-coordinator
+docker compose --env-file .env.gpu \
+  -f infra/docker-compose.gpu-services.yml up -d gpu-coordinator
+```
+
+Avant d'activer l'option dans Obsidian, mesurer sur un extrait représentatif de 5 à
+10 minutes, puis sur une réunion longue : pic VRAM (`nvidia-smi`), mémoire de la VM,
+temps réel, changements de locuteur erronés et retour d'Ollama après le traitement.
+Si la mémoire dépasse le budget ou si le gain est faible, conserver la diarisation
+désactivée ; la transcription CPU et le compte rendu continuent de fonctionner.
+
+Les libellés `Speaker 1`, `Speaker 2`, etc. sont anonymes. Leur correspondance avec
+les participants doit être confirmée manuellement ; le système ne fait ni
+reconnaissance vocale biométrique ni identification de personnes.
 
 ## Préparation initiale du modèle Whisper
 
@@ -161,6 +204,16 @@ GHCR reste privé. Tant qu'un jeton classique dédié `read:packages` n'est pas 
 à Portainer, le serveur utilise l'override d'images locales avec
 `pull_policy: never`. Cette limite n'affecte pas l'exécution courante.
 
+Les migrations Alembic sont exécutées par le conteneur gateway avant Uvicorn. Avant
+une mise à jour, sauvegarder PostgreSQL et noter les tags d'images courants. Après
+redéploiement, vérifier `/v1/health`, l'endpoint authentifié `/v1/health/ready`, le
+heartbeat worker, un petit fichier audio et une requête RAG.
+
+Prometheus interroge `/metrics` avec le Bearer `METRICS_TOKEN`. Le dashboard public
+ne doit jamais contenir ce secret : il s'appuie sur la supervision interne pour
+afficher la disponibilité du gateway, du worker, de PostgreSQL, Redis, du véritable
+serveur Ollama et du coordinateur GPU.
+
 ## Retour arrière et données
 
 Les volumes ont des noms stables :
@@ -170,6 +223,6 @@ Les volumes ont des noms stables :
 - `obsidian-ai-audio` ;
 - `obsidian-ai-whisper-models`.
 
-Un retour arrière applicatif consiste à remplacer les deux tags `main` par les tags
+Un retour arrière applicatif consiste à remplacer les trois tags `main` par les tags
 SHA connus et à redéployer. Il ne faut pas supprimer les volumes. PostgreSQL et les
 fichiers audio devront être intégrés aux sauvegardes avant la mise en production.

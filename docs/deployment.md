@@ -888,10 +888,10 @@ Configured healthchecks:
 - audio clients can now request per-job transcription language with `transcription_language=auto|fr|en`; `auto` does not force a faster-whisper language
 - meeting generation clients can request `output_language=same_as_meeting|fr|en`; this changes the prompt instruction only
 - meeting generation clients can request `generation_mode=standard|deep_think`; `standard` is faster and default, `deep_think` is slower but better for long or important meetings
-- meeting prompts are optimized for local models: direct useful output, no empty template sections, no generic filler, and action items in the simple form `Action | Owner | Due date`
+- meeting prompts are optimized for local models: direct useful output, no empty template sections, no generic filler, and confirmed actions as Obsidian Tasks
 - `WHISPER_BEAM_SIZE` controls beam search width
 - `WHISPER_MODEL_CACHE_DIR`, `HF_HOME`, and `HUGGINGFACE_HUB_CACHE` should point to the persistent model cache volume in Docker
-- speaker diarization is not part of the current worker; transcription stays STT-only so the production path remains predictable and lightweight
+- optional speaker diarization runs through the separate GPU coordinator; leave it disabled until the target GPU has passed a representative memory and latency benchmark
 - TLS certificate management for public Internet exposure is a later step; Traefik is already positioned as the only public entrypoint
 
 ## Recommended worker settings

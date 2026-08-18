@@ -18,6 +18,14 @@ if [[ -z "${postgres_password}" || "${postgres_password}" == replace-with-* ]]; 
   exit 1
 fi
 
+for secret_name in METRICS_TOKEN DIARIZATION_SERVICE_TOKEN; do
+  secret_value="$(sed -n "s/^${secret_name}=//p" "${environment_file}" | tail -n 1)"
+  if [[ -z "${secret_value}" || "${secret_value}" == replace-with-* ]]; then
+    echo "${secret_name} must be replaced before deployment." >&2
+    exit 1
+  fi
+done
+
 bind_address="$(sed -n 's/^GATEWAY_BIND_ADDRESS=//p' "${environment_file}" | tail -n 1)"
 if [[ "${bind_address}" == "0.0.0.0" ]]; then
   echo "GATEWAY_BIND_ADDRESS must target the Docker host address, not 0.0.0.0." >&2

@@ -7,6 +7,7 @@ The current state includes:
 - `apps/ai-gateway`: authenticated FastAPI API for notes, meetings, audio jobs, assistant actions, and vault RAG
 - `apps/obsidian-plugin`: Obsidian plugin for AI actions, recording, meeting reports, and RAG synchronization
 - `apps/whisper-worker`: local faster-whisper transcription worker
+- `apps/diarization-service`: optional GPU speaker diarization and Ollama GPU coordinator
 - `infra/docker-compose.homelab.yml`: deployment target for the Kavalek homelab
 - `docs/`: architecture, security, API, and deployment documentation
 
@@ -16,6 +17,7 @@ The current state includes:
 .
 |-- apps/
 |   |-- ai-gateway/
+|   |-- diarization-service/
 |   |-- obsidian-plugin/
 |   `-- whisper-worker/
 |-- docs/
@@ -78,9 +80,10 @@ npm run check
 
 The plugin MVP now supports:
 
-- Obsidian settings for API URL, API token, default model, templates folder, and output folder
-- the command `AI Meeting Assistant: Summarize current note`
-- summary note creation in the vault after a successful `POST /v1/notes/summarize` call
+- an operational dashboard with real dependency health and a persistent job center
+- recording/upload, progress, cancellation, recovery, transcripts, and meeting reports
+- assistant actions, explicit vault RAG, and versioned meeting templates
+- optional anonymous speaker labels through the GPU diarization service
 
 Plugin-specific setup details are documented in [apps/obsidian-plugin/README.md](apps/obsidian-plugin/README.md).
 
@@ -100,6 +103,6 @@ pytest
 
 ## Current limitations
 
-- schema changes are additive at application startup rather than managed by a migration framework
-- public TLS, proxy rate limiting, backups, and disaster recovery remain deployment responsibilities
-- transcription intentionally does not perform speaker diarization
+- speaker labels are anonymous and approximate; they are not participant identification
+- GPU diarization is opt-in and serialized with Ollama on 8 GB GPUs
+- public TLS, proxy rate limiting, backups, monitoring, and disaster recovery remain deployment responsibilities

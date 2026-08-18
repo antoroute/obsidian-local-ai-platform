@@ -188,7 +188,7 @@ async def search_vault(
         if score >= settings.rag_min_score:
             hits.append(SearchHit(chunk=chunk, document=document, score=score, vector_score=vector_score, keyword_bonus=keyword_bonus, matched_terms=matched_terms))
     hits.sort(key=lambda hit: hit.score, reverse=True)
-    return hits[:top_k]
+    return select_diverse_hits(hits, top_k=top_k, max_per_document=settings.rag_max_chunks_per_document)
 
 
 def search_vault_pgvector(
@@ -240,7 +240,11 @@ def search_vault_pgvector(
         hits.append(SearchHit(chunk=chunk, document=document, score=score, vector_score=vector_score, keyword_bonus=keyword_bonus, matched_terms=matched_terms))
     hits.sort(key=lambda hit: hit.score, reverse=True)
     filtered = [hit for hit in hits if hit.score >= settings.rag_min_score]
-    selected = (filtered or hits)[:top_k]
+    selected = select_diverse_hits(
+        filtered or hits,
+        top_k=top_k,
+        max_per_document=settings.rag_max_chunks_per_document,
+    )
     logger.info(
         "RAG search workspace_id=%s vault_id=%s query_len=%s top_k=%s candidates=%s after_threshold=%s selected_paths=%s scores=%s",
         workspace_id,
@@ -252,6 +256,34 @@ def search_vault_pgvector(
         [hit.document.path for hit in selected],
         [round(hit.score, 4) for hit in selected],
     )
+    return selected
+
+
+def select_diverse_hits(hits: list[SearchHit], *, top_k: int, max_per_document: int) -> list[SearchHit]:
+    selected: list[SearchHit] = []
+    selected_chunk_ids: set[str] = set()
+    counts_by_document: dict[str, int] = {}
+    for hit in hits:
+        if hit.chunk.id in selected_chunk_ids:
+            continue
+        document_count = counts_by_document.get(hit.document.id, 0)
+        if document_count >= max_per_document:
+            continue
+        selected.append(hit)
+        selected_chunk_ids.add(hit.chunk.id)
+        counts_by_document[hit.document.id] = document_count + 1
+        if len(selected) >= top_k:
+            return selected
+
+    # If there are fewer distinct documents than requested, fill the context
+    # with the next unique chunks instead of returning an undersized result.
+    for hit in hits:
+        if hit.chunk.id in selected_chunk_ids:
+            continue
+        selected.append(hit)
+        selected_chunk_ids.add(hit.chunk.id)
+        if len(selected) >= top_k:
+            break
     return selected
 
 
