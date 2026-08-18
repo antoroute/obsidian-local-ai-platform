@@ -16,7 +16,7 @@ RUN python3.11 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 
 RUN pip install --upgrade pip setuptools wheel \
-    && pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+    && pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
 
 COPY pyproject.toml ./
 COPY diarization_service ./diarization_service
