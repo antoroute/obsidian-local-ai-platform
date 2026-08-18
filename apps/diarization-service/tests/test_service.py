@@ -1,9 +1,10 @@
 import os
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 from diarization_service import main
-from diarization_service.main import normalize_speaker_turns
+from diarization_service.main import convert_audio_for_diarization, normalize_speaker_turns
 
 
 class FakeAnnotation:
@@ -40,6 +41,29 @@ def test_ollama_health_checks_the_real_api(monkeypatch) -> None:
 
     assert main.ollama_health()["status"] == "ok"
     assert called_urls == [f"{main.settings.ollama_base_url}/api/version"]
+
+
+def test_audio_is_normalized_to_wav_before_diarization(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "meeting.m4a"
+    source.write_bytes(b"audio")
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs) -> None:
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        Path(command[-1]).write_bytes(b"wav")
+
+    monkeypatch.setattr(main.subprocess, "run", fake_run)
+
+    normalized = convert_audio_for_diarization(source)
+    try:
+        assert normalized.suffix == ".wav"
+        assert normalized.read_bytes() == b"wav"
+        assert captured["command"][-3:-1] == ["-c:a", "pcm_s16le"]
+        assert captured["command"][captured["command"].index("-i") + 1] == str(source)
+        assert captured["kwargs"]["check"] is True
+    finally:
+        normalized.unlink(missing_ok=True)
 
 
 def test_pipeline_uses_the_writable_model_cache(tmp_path, monkeypatch) -> None:

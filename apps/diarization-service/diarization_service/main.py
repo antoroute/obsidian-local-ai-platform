@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import secrets
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Annotated, Any
@@ -23,6 +24,7 @@ class Settings(BaseSettings):
     model_cache_dir: str = "/models/pyannote"
     max_upload_mb: int = 500
     ollama_timeout_seconds: int = 30
+    audio_conversion_timeout_seconds: int = 900
 
 
 class SpeakerTurnResponse(BaseModel):
@@ -39,6 +41,10 @@ class DiarizationResponse(BaseModel):
 settings = Settings()
 gpu_lock = asyncio.Lock()
 app = FastAPI(title="Obsidian GPU coordinator", version="0.1.0")
+
+
+class AudioConversionError(RuntimeError):
+    pass
 
 
 def require_service_token(authorization: str | None) -> None:
@@ -97,6 +103,7 @@ async def diarize(
 
     suffix = Path(file.filename or "audio.wav").suffix[:10] or ".wav"
     temp_path: Path | None = None
+    normalized_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(prefix="obsidian-diarization-", suffix=suffix, delete=False) as temporary:
             temp_path = Path(temporary.name)
@@ -109,14 +116,24 @@ async def diarize(
         if total_bytes == 0:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Audio file is empty.")
 
+        try:
+            normalized_path = await asyncio.to_thread(convert_audio_for_diarization, temp_path)
+        except AudioConversionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Audio format could not be decoded.",
+            ) from exc
+
         async with gpu_lock:
             await unload_ollama_models()
-            turns = await asyncio.to_thread(run_diarization_pipeline, temp_path, min_speakers, max_speakers)
+            turns = await asyncio.to_thread(run_diarization_pipeline, normalized_path, min_speakers, max_speakers)
         return DiarizationResponse(model=settings.model, turns=turns)
     finally:
         await file.close()
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
+        if normalized_path is not None:
+            normalized_path.unlink(missing_ok=True)
 
 
 @app.get("/api/version")
@@ -187,6 +204,40 @@ async def unload_ollama_models() -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Ollama could not be unloaded safely before diarization.",
         ) from exc
+
+
+def convert_audio_for_diarization(audio_path: Path) -> Path:
+    with tempfile.NamedTemporaryFile(prefix="obsidian-diarization-normalized-", suffix=".wav", delete=False) as temporary:
+        normalized_path = Path(temporary.name)
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(audio_path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(normalized_path),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=settings.audio_conversion_timeout_seconds,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        normalized_path.unlink(missing_ok=True)
+        raise AudioConversionError("FFmpeg could not normalize the uploaded audio.") from exc
+    return normalized_path
 
 
 def run_diarization_pipeline(audio_path: Path, min_speakers: int | None, max_speakers: int | None) -> list[SpeakerTurnResponse]:
