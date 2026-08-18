@@ -194,8 +194,10 @@ def run_diarization_pipeline(audio_path: Path, min_speakers: int | None, max_spe
 
     os.environ.setdefault("HF_HOME", settings.model_cache_dir)
     os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(Path(settings.model_cache_dir) / "hub"))
+    os.environ.setdefault("PYANNOTE_CACHE", str(Path(settings.model_cache_dir) / "pipeline"))
     os.environ.setdefault("TORCH_HOME", str(Path(settings.model_cache_dir) / "torch"))
     os.environ.setdefault("XDG_CACHE_HOME", str(Path(settings.model_cache_dir) / "cache"))
+    os.environ.setdefault("MPLCONFIGDIR", str(Path(settings.model_cache_dir) / "matplotlib"))
     import torch
     from pyannote.audio import Pipeline
 

@@ -14,8 +14,10 @@ services:
       HF_TOKEN: ${HF_TOKEN:-}
       HF_HOME: /models/pyannote
       HUGGINGFACE_HUB_CACHE: /models/pyannote/hub
+      PYANNOTE_CACHE: /models/pyannote/pipeline
       TORCH_HOME: /models/pyannote/torch
       XDG_CACHE_HOME: /models/pyannote/cache
+      MPLCONFIGDIR: /models/pyannote/matplotlib
       HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
       OLLAMA_BASE_URL: ${GPU_OLLAMA_BASE_URL:-http://127.0.0.1:11435}
       MODEL_CACHE_DIR: /models/pyannote

@@ -1,3 +1,4 @@
+import os
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -44,6 +45,9 @@ def test_ollama_health_checks_the_real_api(monkeypatch) -> None:
 def test_pipeline_uses_the_writable_model_cache(tmp_path, monkeypatch) -> None:
     captured: dict[str, object] = {}
 
+    for variable in ("PYANNOTE_CACHE", "MPLCONFIGDIR"):
+        monkeypatch.delenv(variable, raising=False)
+
     class FakeCuda:
         @staticmethod
         def is_available() -> bool:
@@ -84,6 +88,8 @@ def test_pipeline_uses_the_writable_model_cache(tmp_path, monkeypatch) -> None:
     assert captured["cache_dir"] == str(tmp_path / "pipeline")
     assert captured["use_auth_token"] == (main.settings.hf_token or None)
     assert captured["options"] == {"min_speakers": 2, "max_speakers": 3}
+    assert os.environ["PYANNOTE_CACHE"] == str(tmp_path / "pipeline")
+    assert os.environ["MPLCONFIGDIR"] == str(tmp_path / "matplotlib")
 
 
 def test_transparent_ollama_routes_are_registered_after_service_routes() -> None:
