@@ -44,5 +44,7 @@ def test_transparent_ollama_routes_are_registered_after_service_routes() -> None
     paths = [route.path for route in main.app.routes]
 
     assert paths.index("/v1/health") < paths.index("/v1/{upstream_path:path}")
+    assert paths.index("/api/version") < paths.index("/api/{upstream_path:path}")
+    assert paths.index("/api/tags") < paths.index("/api/{upstream_path:path}")
     assert "/api/{upstream_path:path}" in paths
     assert "/ollama/{upstream_path:path}" in paths

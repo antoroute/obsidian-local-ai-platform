@@ -119,34 +119,48 @@ async def diarize(
             temp_path.unlink(missing_ok=True)
 
 
+@app.get("/api/version")
+@app.get("/api/tags")
+async def proxy_ollama_status(request: Request) -> Response:
+    # These endpoints only inspect the native Ollama server and do not load a
+    # model onto the GPU. Keeping them outside the GPU lock prevents a long
+    # generation from looking like an Ollama outage in Gatus or Prometheus.
+    return await forward_ollama_request(request)
+
+
 @app.api_route("/ollama/{upstream_path:path}", methods=["GET", "POST", "DELETE"])
 @app.api_route("/api/{upstream_path:path}", methods=["GET", "POST", "DELETE"])
 @app.api_route("/v1/{upstream_path:path}", methods=["GET", "POST", "DELETE"])
 async def proxy_ollama(upstream_path: str, request: Request) -> Response:
+    del upstream_path
     # All Ollama traffic goes through the same lock. A diarization therefore
     # cannot race a model reload on the 8 GB GPU.
     async with gpu_lock:
-        body = await request.body()
-        headers = {"Content-Type": request.headers.get("content-type", "application/json")}
-        async with httpx.AsyncClient(
-            base_url=settings.ollama_base_url.rstrip("/"),
-            timeout=None,
-        ) as client:
-            upstream_path_with_prefix = request.url.path
-            if upstream_path_with_prefix.startswith("/ollama/"):
-                upstream_path_with_prefix = upstream_path_with_prefix.removeprefix("/ollama")
-            upstream = await client.request(
-                request.method,
-                upstream_path_with_prefix,
-                params=request.query_params,
-                content=body,
-                headers=headers,
-            )
-        return Response(
-            content=upstream.content,
-            status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type"),
+        return await forward_ollama_request(request)
+
+
+async def forward_ollama_request(request: Request) -> Response:
+    body = await request.body()
+    headers = {"Content-Type": request.headers.get("content-type", "application/json")}
+    async with httpx.AsyncClient(
+        base_url=settings.ollama_base_url.rstrip("/"),
+        timeout=None,
+    ) as client:
+        upstream_path = request.url.path
+        if upstream_path.startswith("/ollama/"):
+            upstream_path = upstream_path.removeprefix("/ollama")
+        upstream = await client.request(
+            request.method,
+            upstream_path,
+            params=request.query_params,
+            content=body,
+            headers=headers,
         )
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type"),
+    )
 
 
 async def unload_ollama_models() -> None:
