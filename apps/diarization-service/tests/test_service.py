@@ -1,4 +1,5 @@
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 from diarization_service import main
 from diarization_service.main import normalize_speaker_turns
@@ -38,6 +39,51 @@ def test_ollama_health_checks_the_real_api(monkeypatch) -> None:
 
     assert main.ollama_health()["status"] == "ok"
     assert called_urls == [f"{main.settings.ollama_base_url}/api/version"]
+
+
+def test_pipeline_uses_the_writable_model_cache(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def empty_cache() -> None:
+            return None
+
+    class FakePipeline:
+        @classmethod
+        def from_pretrained(cls, model: str, **kwargs):
+            captured.update(model=model, **kwargs)
+            return cls()
+
+        def to(self, device) -> None:
+            captured["device"] = device
+
+        def __call__(self, audio_path: str, **kwargs):
+            captured["audio_path"] = audio_path
+            captured["options"] = kwargs
+            return FakeAnnotation()
+
+    fake_torch = ModuleType("torch")
+    fake_torch.cuda = FakeCuda()
+    fake_torch.device = lambda name: name
+    fake_pyannote = ModuleType("pyannote")
+    fake_pyannote_audio = ModuleType("pyannote.audio")
+    fake_pyannote_audio.Pipeline = FakePipeline
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "pyannote", fake_pyannote)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", fake_pyannote_audio)
+    monkeypatch.setattr(main.settings, "model_cache_dir", str(tmp_path))
+
+    turns = main.run_diarization_pipeline(tmp_path / "audio.wav", 2, 3)
+
+    assert turns
+    assert captured["cache_dir"] == str(tmp_path / "pipeline")
+    assert captured["use_auth_token"] == (main.settings.hf_token or None)
+    assert captured["options"] == {"min_speakers": 2, "max_speakers": 3}
 
 
 def test_transparent_ollama_routes_are_registered_after_service_routes() -> None:

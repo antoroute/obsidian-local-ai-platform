@@ -194,6 +194,8 @@ def run_diarization_pipeline(audio_path: Path, min_speakers: int | None, max_spe
 
     os.environ.setdefault("HF_HOME", settings.model_cache_dir)
     os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(Path(settings.model_cache_dir) / "hub"))
+    os.environ.setdefault("TORCH_HOME", str(Path(settings.model_cache_dir) / "torch"))
+    os.environ.setdefault("XDG_CACHE_HOME", str(Path(settings.model_cache_dir) / "cache"))
     import torch
     from pyannote.audio import Pipeline
 
@@ -201,7 +203,11 @@ def run_diarization_pipeline(audio_path: Path, min_speakers: int | None, max_spe
         raise RuntimeError("CUDA is not available for diarization.")
     pipeline: Any | None = None
     try:
-        pipeline = Pipeline.from_pretrained(settings.model, use_auth_token=settings.hf_token or None)
+        pipeline = Pipeline.from_pretrained(
+            settings.model,
+            use_auth_token=settings.hf_token or None,
+            cache_dir=str(Path(settings.model_cache_dir) / "pipeline"),
+        )
         pipeline.to(torch.device("cuda"))
         options = {key: value for key, value in {"min_speakers": min_speakers, "max_speakers": max_speakers}.items() if value is not None}
         output = pipeline(str(audio_path), **options)
