@@ -7,7 +7,7 @@ const production = process.argv[2] === "production";
 const context = await esbuild.context({
   entryPoints: ["src/main.ts"],
   bundle: true,
-  external: ["obsidian", "electron", "@codemirror/state", ...builtinModules],
+  external: ["obsidian", "electron", "@codemirror/state", ...builtinModules, "node:*"],
   format: "cjs",
   target: "es2020",
   logLevel: "info",

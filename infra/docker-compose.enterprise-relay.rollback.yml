@@ -1,0 +1,9 @@
+# Emergency rollback ONLY after validating that the retained additive migration
+# is compatible with the selected previous gateway image. Keep the DB backup.
+# Old images do not know revision 20261010_0003; their default Alembic CMD fails.
+# Stop relay-maintenance first. Remove this overlay when restoring a current image.
+services:
+  ai-gateway:
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      ENTERPRISE_RELAY_ENABLED: "false"

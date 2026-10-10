@@ -1,0 +1,56 @@
+# Optional overlay for docker-compose.yml (not for the standalone homelab stack).
+# The relay remains disabled until explicit environment configuration.
+x-enterprise-relay-environment: &enterprise-relay-environment
+  ENTERPRISE_RELAY_ENABLED: ${ENTERPRISE_RELAY_ENABLED:-false}
+  ENTERPRISE_RELAY_ALLOWED_MODELS: ${ENTERPRISE_RELAY_ALLOWED_MODELS:-}
+  ENTERPRISE_RELAY_ALLOWED_USER_IDS: ${ENTERPRISE_RELAY_ALLOWED_USER_IDS:-}
+  ENTERPRISE_RELAY_SESSION_TTL_SECONDS: ${ENTERPRISE_RELAY_SESSION_TTL_SECONDS:-28800}
+  ENTERPRISE_RELAY_LEASE_SECONDS: ${ENTERPRISE_RELAY_LEASE_SECONDS:-90}
+  ENTERPRISE_GENERATION_TTL_SECONDS: ${ENTERPRISE_GENERATION_TTL_SECONDS:-86400}
+  ENTERPRISE_GENERATION_RETENTION_DAYS: ${ENTERPRISE_GENERATION_RETENTION_DAYS:-7}
+  ENTERPRISE_MAX_ACTIVE_GENERATIONS_PER_USER: ${ENTERPRISE_MAX_ACTIVE_GENERATIONS_PER_USER:-3}
+  ENTERPRISE_DAILY_GENERATIONS_PER_USER: ${ENTERPRISE_DAILY_GENERATIONS_PER_USER:-100}
+  ENTERPRISE_MAX_PROMPT_CHARS: ${ENTERPRISE_MAX_PROMPT_CHARS:-100000}
+  ENTERPRISE_MAX_RESULT_CHARS: ${ENTERPRISE_MAX_RESULT_CHARS:-200000}
+
+services:
+  ai-gateway:
+    image: ${GATEWAY_IMAGE:-obsidian-ai-gateway:local}
+    environment:
+      <<: *enterprise-relay-environment
+
+  relay-maintenance:
+    image: ${GATEWAY_IMAGE:-obsidian-ai-gateway:local}
+    profiles:
+      - enterprise-relay
+    init: true
+    # The gateway's inherited build produces the same image; migrations run there.
+    command: ["python", "-m", "app.generation_maintenance", "--loop"]
+    environment:
+      <<: *enterprise-relay-environment
+      AI_GATEWAY_LOG_LEVEL: ${AI_GATEWAY_LOG_LEVEL:-info}
+      AI_GATEWAY_DATABASE_URL: ${AI_GATEWAY_DATABASE_URL:-postgresql+psycopg://app:change-me@postgres:5432/obsidian_ai}
+    depends_on:
+      ai-gateway:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - ai_internal
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.generation_maintenance", "--check"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    pids_limit: 64
+    cpus: "0.25"
+    mem_limit: 256m
+    restart: unless-stopped

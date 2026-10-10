@@ -16,6 +16,7 @@
   normalizePath,
   requestUrl,
 } from "obsidian";
+import { LlmUiController } from "./llm-ui";
 
 const DASHBOARD_VIEW_TYPE = "notre-compagnon-dashboard";
 const DEFAULT_TEMPLATE_FILE = "note-summary-fr.md";
@@ -30,7 +31,7 @@ const DEFAULT_RECORDING_EXTENSION = ".webm";
 const DEFAULT_RECORDING_MIME_TYPE = "audio/webm";
 const SUPPORTED_AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".webm", ".ogg"]);
 const LEGACY_DEFAULT_MODELS = new Set(["qwen2.5:7b", "qwen2.5:14b"]);
-const PLUGIN_BUILD_ID = "0.2.0-job-center-gpu-diarization";
+const PLUGIN_BUILD_ID = "0.3.0-enterprise-relay";
 const RECOMMENDED_TEMPLATE_VERSION = 2;
 type TemplateInstallSet = "minimal" | "fr" | "en" | "all";
 type TemplatePurpose = "note_summary" | "meeting_summary";
@@ -410,6 +411,7 @@ interface SummarizeRequestPayload {
 }
 
 interface SummarizeResponsePayload {
+  generation_id?: string;
   model: string;
   title: string;
   summary_markdown: string;
@@ -513,6 +515,7 @@ interface MeetingGenerateFromJobPayload {
 }
 
 interface MeetingGenerateFromJobResponsePayload {
+  generation_id?: string;
   job_id: string;
   model: string;
   title: string;
@@ -791,6 +794,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
 
 export default class LocalAiPlatformPlugin extends Plugin {
   settings: PluginSettings = DEFAULT_SETTINGS;
+  llm!: LlmUiController;
   activeRecording: ActiveRecordingSession | null = null;
   audioInputDevices: AudioInputDeviceChoice[] = [{ deviceId: "", label: "Default microphone" }];
   ragIndexProgress: VaultIndexProgress = createIdleVaultIndexProgress();
@@ -802,6 +806,14 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    this.llm = new LlmUiController({
+      app: this.app,
+      getApiBaseUrl: () => this.getApiBaseUrl(),
+      getApiToken: () => this.getApiToken(),
+      getPersonalModel: () => this.settings.defaultModel || DEFAULT_MODEL,
+      setPersonalModel: async model => { this.settings.defaultModel = model; await this.saveSettings(); },
+      getOutputFolder: () => this.getOutputFolder(),
+    });
     console.info("Note Compagnon loaded", { build: PLUGIN_BUILD_ID });
 
     this.registerView(DASHBOARD_VIEW_TYPE, (leaf) => new NoteCompagnonDashboardView(leaf, this));
@@ -900,6 +912,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.llm?.dispose();
     this.app.workspace.detachLeavesOfType(DASHBOARD_VIEW_TYPE);
   }
 
@@ -1739,6 +1752,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
   }
 
   async requestSummary(apiBaseUrl: string, apiToken: string, payload: SummarizeRequestPayload): Promise<SummarizeResponsePayload> {
+    if (this.llm.isEnterprise) {
+      return this.parseSummaryResponse(await this.llm.execute("note_summary", payload));
+    }
     const responseText = await this.performJsonRequest({
       apiBaseUrl,
       apiToken,
@@ -1765,6 +1781,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
     apiToken: string,
     payload: MeetingGenerateFromJobPayload,
   ): Promise<MeetingGenerateFromJobResponsePayload> {
+    if (this.llm.isEnterprise) {
+      return this.parseMeetingGenerateFromJobResponse(await this.llm.execute("meeting_from_job", payload));
+    }
     const responseText = await this.performJsonRequest({
       apiBaseUrl,
       apiToken,
@@ -1814,6 +1833,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
     apiToken: string,
     payload: AssistantChatRequestPayload,
   ): Promise<AssistantChatResponsePayload> {
+    if (this.llm.isEnterprise) {
+      return this.parseAssistantChatResponse(await this.llm.execute("assistant", payload));
+    }
     console.debug("Note Compagnon assistant request", {
       endpoint: "/v1/assistant/chat",
       mode: payload.mode,
@@ -1864,6 +1886,12 @@ export default class LocalAiPlatformPlugin extends Plugin {
   async askVault(question: string): Promise<VaultAskResponsePayload> {
     if (!this.settings.ragEnabled) {
       throw new UserFacingError("La connaissance du vault est desactivee dans les reglages.");
+    }
+    if (this.llm.isEnterprise) {
+      return this.parseVaultAskResponse(await this.llm.execute("vault_answer", {
+        vault_id: this.getVaultId(), workspace_id: this.getRagWorkspaceId(), question,
+        top_k: 8, answer_language: "same_as_input", debug: true,
+      }));
     }
     const responseText = await this.performJsonRequest({
       apiBaseUrl: this.getApiBaseUrl(),
@@ -3043,7 +3071,10 @@ export default class LocalAiPlatformPlugin extends Plugin {
 
     const date = formatDate(new Date());
     const safeTitle = sanitizeFileName(sourceFile.basename);
-    const outputPath = normalizePath(`${outputFolder}/${date} - Note Compagnon Summary - ${safeTitle}.md`);
+    const outputPath = response.generation_id ? this.llm.outputPath(response.generation_id)
+      : normalizePath(`${outputFolder}/${date} - Note Compagnon Summary - ${safeTitle}.md`);
+    const previousGeneration = response.generation_id ? this.app.vault.getAbstractFileByPath(outputPath) : null;
+    if (previousGeneration instanceof TFile) return previousGeneration;
     const sourceLink = this.app.metadataCache.fileToLinktext(sourceFile, "", true);
     const noteContent = buildSummaryNote({
       title: response.title || sourceFile.basename,
@@ -3055,6 +3086,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       generatedAt: new Date(),
     });
 
+    if (response.generation_id) return this.llm.saveGeneratedNote(response.generation_id, noteContent);
     return createOrReplaceFile(this.app, outputPath, noteContent);
   }
 
@@ -3075,9 +3107,11 @@ export default class LocalAiPlatformPlugin extends Plugin {
     await ensureFolderExists(this.app, outputFolder);
 
     const generatedAt = input.generatedAt ?? new Date();
-    const outputPath = normalizePath(
+    const outputPath = input.response.generation_id ? this.llm.outputPath(input.response.generation_id) : normalizePath(
       `${outputFolder}/${formatDateTimeForFile(generatedAt)} - Compte rendu - ${sanitizeFileName(input.response.title)}.md`,
     );
+    const previousGeneration = input.response.generation_id ? this.app.vault.getAbstractFileByPath(outputPath) : null;
+    if (previousGeneration instanceof TFile) return previousGeneration;
 
     const sourceMeetingLink = input.sourceNoteFile
       ? this.app.metadataCache.fileToLinktext(input.sourceNoteFile, "", true)
@@ -3106,6 +3140,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       meetingMarkdown: cleanGeneratedMarkdown(input.response.meeting_markdown),
     });
 
+    if (input.response.generation_id) return this.llm.saveGeneratedNote(input.response.generation_id, noteContent);
     return createOrReplaceFile(this.app, outputPath, noteContent);
   }
 
@@ -3313,6 +3348,8 @@ class NoteCompagnonDashboardView extends ItemView {
     container.addClass("notre-compagnon-dashboard");
     container.createEl("h2", { text: "Note Compagnon" });
 
+    this.plugin.llm.renderSelector(container);
+
     container.createEl("h3", { text: "Reunion" });
     this.addActionGrid(container, [
       ["Demarrer reunion", async () => this.plugin.startMeetingRecording()],
@@ -3327,6 +3364,7 @@ class NoteCompagnonDashboardView extends ItemView {
     this.addActionGrid(container, [["Actualiser", async () => this.refreshJobs(true)]]);
     this.jobListEl = container.createDiv({ cls: "notre-compagnon-job-list" });
     this.renderJobList();
+    this.plugin.llm.renderHistory(container);
 
     container.createEl("h3", { text: "Assistant" });
     const modeSetting = new Setting(container)
@@ -3528,6 +3566,7 @@ class NoteCompagnonDashboardView extends ItemView {
       return;
     }
     try {
+      void this.plugin.llm.refreshHistory();
       this.jobs = await this.plugin.listAudioJobs(20);
       this.renderJobList();
     } catch (error) {
@@ -3869,6 +3908,7 @@ class LocalAiPlatformSettingTab extends PluginSettingTab {
 
     const activeTab = this.plugin.settings.settingsActiveTab || "general";
     if (activeTab === "general") {
+      this.plugin.llm.renderSelector(containerEl);
       this.renderGeneralSettings(containerEl);
       return;
     }
