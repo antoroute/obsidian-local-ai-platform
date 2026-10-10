@@ -75,6 +75,25 @@ class Settings(BaseSettings):
     rag_index_excluded_tags_raw: str = Field(default="noai,private", alias="RAG_INDEX_EXCLUDED_TAGS")
     rag_default_vault_id: str = Field(default="default", alias="RAG_DEFAULT_VAULT_ID")
     rag_workspace_id: str = Field(default="", alias="RAG_WORKSPACE_ID")
+    enterprise_relay_enabled: bool = Field(default=False, alias="ENTERPRISE_RELAY_ENABLED")
+    enterprise_relay_allowed_models_raw: str = Field(default="", alias="ENTERPRISE_RELAY_ALLOWED_MODELS")
+    enterprise_relay_allowed_user_ids_raw: str = Field(default="", alias="ENTERPRISE_RELAY_ALLOWED_USER_IDS")
+    enterprise_relay_session_ttl_seconds: int = Field(default=28800, ge=300, le=86400, alias="ENTERPRISE_RELAY_SESSION_TTL_SECONDS")
+    enterprise_relay_lease_seconds: int = Field(default=90, ge=30, le=600, alias="ENTERPRISE_RELAY_LEASE_SECONDS")
+    enterprise_generation_ttl_seconds: int = Field(default=86400, ge=600, le=604800, alias="ENTERPRISE_GENERATION_TTL_SECONDS")
+    enterprise_generation_retention_days: int = Field(default=7, ge=2, le=30, alias="ENTERPRISE_GENERATION_RETENTION_DAYS")
+    enterprise_max_active_generations_per_user: int = Field(default=3, ge=1, le=10, alias="ENTERPRISE_MAX_ACTIVE_GENERATIONS_PER_USER")
+    enterprise_daily_generations_per_user: int = Field(default=100, ge=1, le=1000, alias="ENTERPRISE_DAILY_GENERATIONS_PER_USER")
+    enterprise_max_prompt_chars: int = Field(default=100000, ge=4000, le=500000, alias="ENTERPRISE_MAX_PROMPT_CHARS")
+    enterprise_max_result_chars: int = Field(default=200000, ge=1000, le=500000, alias="ENTERPRISE_MAX_RESULT_CHARS")
+
+    @property
+    def enterprise_relay_allowed_models(self) -> list[str]:
+        return [value.strip() for value in self.enterprise_relay_allowed_models_raw.split(",") if value.strip()]
+
+    @property
+    def enterprise_relay_allowed_user_ids(self) -> list[str]:
+        return [value.strip() for value in self.enterprise_relay_allowed_user_ids_raw.split(",") if value.strip()]
 
     @property
     def allowed_models(self) -> list[str]:
