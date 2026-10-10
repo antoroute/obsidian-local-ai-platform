@@ -105,6 +105,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
+from app.generation_routes import GenerationBodyLimitMiddleware, router as generation_router
+
+app.add_middleware(GenerationBodyLimitMiddleware)
+app.include_router(generation_router)
+
 if settings.cors_enabled:
     app.add_middleware(
         CORSMiddleware,
