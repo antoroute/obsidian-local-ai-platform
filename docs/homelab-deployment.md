@@ -14,7 +14,7 @@ flowchart LR
     G --> R[(Redis)]
     G -->|requêtes sérialisées| C[Coordinateur GPU<br/>10.0.70.10:11434]
     C -->|verrou GPU| L[Ollama natif<br/>127.0.0.1:11435<br/>RTX 2070 8 Go]
-    R --> W[Whisper worker<br/>CPU, small/int8]
+    R --> W[Whisper worker<br/>CPU, medium/int8]
     W --> P
     W -->|audio, opt-in + Bearer privé| C
     C -->|verrou GPU| D[pyannote 3.1<br/>chargé à la demande]
@@ -40,8 +40,8 @@ ni le LXC Docker :
 - contexte Ollama limité à `16384` tokens ;
 - un seul appel Ollama simultané pour partager proprement le GPU avec Open WebUI ;
 - modèle conservé cinq minutes après la dernière requête, puis libérable par Ollama ;
-- transcription sur CPU avec faster-whisper `small`, calcul `int8`, deux threads et
-  un worker ;
+- transcription sur CPU avec faster-whisper `medium`, calcul `int8`, beam 5,
+  deux threads et un worker (profil qualité, plus lent que `small`/beam 3) ;
 - limites Docker : gateway 1 CPU/1 Gio, worker 2 CPU/4 Gio, PostgreSQL 1 CPU/1,5 Gio,
   Redis 0,5 CPU/256 Mio.
 
@@ -100,7 +100,8 @@ Ne jamais committer le fichier réel. Avant le déploiement, vérifier notamment
 - `DAILY_EMBEDDING_REQUESTS_PER_USER=5000` ;
 - `DAILY_AUDIO_JOBS_PER_USER=20` ;
 - `MAX_ACTIVE_AUDIO_JOBS_PER_USER=1` ;
-- `WHISPER_MODEL_SIZE=small` ;
+- `WHISPER_MODEL_SIZE=medium` ;
+- `WHISPER_BEAM_SIZE=5` ;
 - deux secrets distincts et aléatoires dans `METRICS_TOKEN` et
   `DIARIZATION_SERVICE_TOKEN` ;
 - le même `DIARIZATION_SERVICE_TOKEN` sur le worker et le coordinateur GPU.
@@ -194,10 +195,16 @@ retour `401` sans token ont été validés le 13 août 2026.
 
 ## Phase 3 appliquée
 
-Le déploiement réel utilise l'Ollama existant sur `10.0.70.10`, PostgreSQL/pgvector
+Le déploiement initial du 13 août utilisait l'Ollama existant sur `10.0.70.10`, PostgreSQL/pgvector
 et Redis internes, Whisper `small` CPU/int8 avec un seul worker, et le seul port
 publié `10.0.20.20:18000`. Les tests fonctionnels couvrent authentification,
 résumé, assistant, réunions, RAG et transcription audio réelle.
+
+Le profil qualité du 9 octobre passe Whisper à `medium`/beam 5. La procédure de
+mesure, de déploiement et de retour arrière est dans
+[transcription-quality.md](transcription-quality.md). Les fichiers `.env.homelab`
+existants prennent le pas sur les valeurs par défaut du Compose : modifier les
+deux variables explicitement après le préchargement du modèle.
 
 GHCR reste privé. Tant qu'un jeton classique dédié `read:packages` n'est pas ajouté
 à Portainer, le serveur utilise l'override d'images locales avec

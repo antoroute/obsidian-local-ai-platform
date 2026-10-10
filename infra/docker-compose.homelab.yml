@@ -113,11 +113,11 @@ services:
       WHISPER_WORKER_QUEUE: audio_transcription_jobs
       AUDIO_STORAGE_DIR: /data/audio
       TRANSCRIPTION_ENGINE: faster_whisper
-      WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
+      WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-medium}
       WHISPER_DEVICE: cpu
       WHISPER_COMPUTE_TYPE: int8
       WHISPER_LANGUAGE: auto
-      WHISPER_BEAM_SIZE: ${WHISPER_BEAM_SIZE:-3}
+      WHISPER_BEAM_SIZE: ${WHISPER_BEAM_SIZE:-5}
       WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-2}
       WHISPER_NUM_WORKERS: "1"
       WHISPER_MODEL_CACHE_DIR: /models/whisper
@@ -161,10 +161,10 @@ services:
     pull_policy: always
     profiles:
       - prepare-model
-    command: ["python", "-m", "whisper_worker", "prepare-model", "--model", "${WHISPER_MODEL_SIZE:-small}"]
+    command: ["python", "-m", "whisper_worker", "prepare-model", "--model", "${WHISPER_MODEL_SIZE:-medium}"]
     environment:
       TRANSCRIPTION_ENGINE: faster_whisper
-      WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
+      WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-medium}
       WHISPER_DEVICE: cpu
       WHISPER_COMPUTE_TYPE: int8
       WHISPER_MODEL_CACHE_DIR: /models/whisper
