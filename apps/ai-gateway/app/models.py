@@ -96,3 +96,62 @@ class VaultChunk(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     document: Mapped[VaultDocument] = relationship(back_populates="chunks")
+
+
+class GenerationUserState(Base):
+    """A per-user transaction mutex; also serializes quota and capacity checks."""
+    __tablename__ = "generation_user_states"
+    user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class RelaySession(Base):
+    __tablename__ = "relay_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    device_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    profile_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    secret_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    models_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class GenerationRun(Base):
+    __tablename__ = "generation_runs"
+    __table_args__ = (UniqueConstraint("user_id", "idempotency_key", name="uq_generation_user_idempotency"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(36), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    profile_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    relay_session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    plan_json: Mapped[str] = mapped_column(Text, nullable=False)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class GenerationStep(Base):
+    __tablename__ = "generation_steps"
+    __table_args__ = (UniqueConstraint("generation_id", "position", name="uq_generation_step_position"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    generation_id: Mapped[str] = mapped_column(String(36), ForeignKey("generation_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    messages_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    result_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    relay_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
