@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from redis.exceptions import RedisError
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
 from app.auth import get_current_token, require_scope
@@ -89,14 +90,28 @@ async def submit_generation(payload: GenerationCreate, token: Token, session: Da
     require_enabled(user_id, settings)
     require_scope_for(token, payload.kind)
     fingerprint = digest(dump(payload.model_dump(mode="json")))
-    existing = existing_request(session, user_id, str(payload.idempotency_key), fingerprint)
-    if existing:
-        return status_view(session, existing)
-    relay = require_session(session, str(payload.target.relay_session_id), user_id, proof=False)
-    validate_model(payload.target.model_id, relay, settings)
+
+    def preflight():
+        try:
+            existing = existing_request(session, user_id, str(payload.idempotency_key), fingerprint)
+            if existing:
+                view = status_view(session, existing)
+            else:
+                relay = require_session(session, str(payload.target.relay_session_id), user_id, proof=False)
+                validate_model(payload.target.model_id, relay, settings)
+                view = None
+            session.commit()
+            return view
+        except BaseException:
+            session.rollback()
+            raise
+
+    existing_view = await run_in_threadpool(preflight)
+    if existing_view is not None:
+        return existing_view
     if payload.kind == "vault_answer" and settings.usage_quotas_enabled:
         try:
-            usage = limiter.consume(user_id=user_id, bucket="embedding", limit=settings.daily_embedding_requests_per_user)
+            usage = await run_in_threadpool(limiter.consume, user_id=user_id, bucket="embedding", limit=settings.daily_embedding_requests_per_user)
         except RedisError as exc:
             raise HTTPException(503, "Usage quota service is unavailable.") from exc
         if usage.exceeded:
@@ -107,23 +122,31 @@ async def submit_generation(payload: GenerationCreate, token: Token, session: Da
         raise HTTPException(503, "Local embedding service is unavailable.") from exc
     except OllamaResponseError as exc:
         raise HTTPException(502, "Local embedding service returned an invalid response.") from exc
-    session.commit()  # all network preparation ends before the user mutex
-    lock_user(session, user_id)
-    existing = existing_request(session, user_id, str(payload.idempotency_key), fingerprint)
-    if existing:
-        view = status_view(session, existing)
-        session.commit()
-        return view
-    require_enabled(user_id, settings)
-    relay = require_session(session, str(payload.target.relay_session_id), user_id, proof=False)
-    validate_model(payload.target.model_id, relay, settings)
-    reconcile_user(session, user_id, settings)
-    session.flush()
-    run = create_run(session, user_id=user_id, payload=payload, request_hash=fingerprint, plan=plan, settings=settings)
-    session.flush()
-    view = status_view(session, run)
-    session.commit()
-    return view
+    def persist() -> dict[str, Any]:
+        # Database lock waits must never block the ASGI loop: another request
+        # may need that loop to finish and release its transaction.
+        session.commit()  # all network preparation ends before the user mutex
+        try:
+            lock_user(session, user_id)
+            existing = existing_request(session, user_id, str(payload.idempotency_key), fingerprint)
+            if existing:
+                view = status_view(session, existing)
+            else:
+                require_enabled(user_id, settings)
+                relay = require_session(session, str(payload.target.relay_session_id), user_id, proof=False)
+                validate_model(payload.target.model_id, relay, settings)
+                reconcile_user(session, user_id, settings)
+                session.flush()
+                run = create_run(session, user_id=user_id, payload=payload, request_hash=fingerprint, plan=plan, settings=settings)
+                session.flush()
+                view = status_view(session, run)
+            session.commit()
+            return view
+        except BaseException:
+            session.rollback()
+            raise
+
+    return await run_in_threadpool(persist)
 
 
 @router.get("/generations")
@@ -252,16 +275,25 @@ async def claim_step(session_id: UUID, payload: RelayClaim, token: Token, sessio
     settings, user_id = get_settings(), token.user_id
     require_enabled(user_id, settings)
     deadline = time.monotonic() + payload.wait_seconds
+
+    def poll_once():
+        try:
+            lock_user(session, user_id)
+            # Long polling may outlive revocation/expiry of the gateway credential.
+            if token.revoked or is_expired(token.expires_at):
+                raise HTTPException(401, "Authentication credentials are no longer valid.")
+            relay = require_session(session, str(session_id), user_id, secret)
+            reconcile_user(session, user_id, settings)
+            relay.heartbeat_at = utc_now()
+            step = claim(session, relay=relay, run_ids=[str(item) for item in payload.run_ids], token=token, settings=settings)
+            session.commit()  # no transaction or connection held over the wait
+            return step
+        except BaseException:
+            session.rollback()
+            raise
+
     while True:
-        lock_user(session, user_id)
-        # Long polling may outlive revocation/expiry of the gateway credential.
-        if token.revoked or is_expired(token.expires_at):
-            raise HTTPException(401, "Authentication credentials are no longer valid.")
-        relay = require_session(session, str(session_id), user_id, secret)
-        reconcile_user(session, user_id, settings)
-        relay.heartbeat_at = utc_now()
-        step = claim(session, relay=relay, run_ids=[str(item) for item in payload.run_ids], token=token, settings=settings)
-        session.commit()  # no transaction or connection held over the wait
+        step = await run_in_threadpool(poll_once)
         if step is not None or time.monotonic() >= deadline:
             return {"step": step}
         await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))

@@ -61,6 +61,7 @@ jobs:
 
   gateway-postgres:
     name: Enterprise relay PostgreSQL
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -88,7 +89,7 @@ jobs:
         run: pip install '.[dev]' 'psycopg[binary]>=3.1,<4.0'
       - name: Run gateway tests including PostgreSQL
         working-directory: apps/ai-gateway
-        run: pytest -q
+        run: pytest -q -o faulthandler_timeout=30
       - name: Validate additive PostgreSQL migrations
         working-directory: apps/ai-gateway
         env:
