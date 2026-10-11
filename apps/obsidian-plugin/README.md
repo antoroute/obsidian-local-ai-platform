@@ -21,6 +21,41 @@ Use the existing plugin ID folder so upgrades do not break an installed vault:
 
 Place `manifest.json` and `main.js` there.
 
+## Enterprise mode (Desktop pilot)
+
+The dashboard and General settings expose **Exécution du LLM**: Personnel (Ollama)
+or Entreprise (HeadMind), followed by a model selector. The mode starts as
+Personnel each time Obsidian opens. It is separate from Simple / Note / Vault
+context selection and from Standard / Approfondi meeting generation.
+
+On the professional PC, connect to the company network or VPN, select Entreprise,
+and use **Connecter HeadMind**. Enter the company token in that dialog only.
+The token and relay session remain in memory; they are never saved in `data.json`
+or sent to the personal gateway. Closing Obsidian requires entering the token again.
+**Tester ce modèle** sends a short synthetic request, with no note contents.
+
+The gateway must enable the relay and allow the exact model ID returned by
+HeadMind. A successful HeadMind connection test alone does not enable the gateway.
+See [server operations](../../docs/enterprise-llm-relay-operations.md).
+
+Assistant actions, note summaries, meeting reports and vault answers use the
+explicitly selected provider. Whisper, diarization and embeddings stay on the
+personal infrastructure. Relevant text context goes to HeadMind; answers return
+to the personal gateway. The PC needs access to both services at the same time.
+
+Enterprise runs appear in the task center. After reconnecting or replacing a
+token, use **Reprendre sur ce PC**. An interrupted call with an unknown outcome
+requires explicit confirmation before another model call. There is no automatic
+fallback to Ollama. Completed runs can be saved or opened repeatedly without
+overwriting a previously edited note. Enterprise reports use a stable generation
+ID in the filename and metadata.
+
+The connector validates TLS and rejects redirects. Corporate proxies, custom
+certificate authorities and SSO requirements must be verified on the actual PC;
+the plugin does not disable certificate checks or bypass network controls.
+The initial pilot buffers the complete response rather than displaying tokens
+progressively. Mobile and older gateways retain the existing personal workflow.
+
 ## Configuration
 
 Configure these settings in Obsidian:

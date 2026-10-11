@@ -1,11 +1,25 @@
 name: obsidian-ai
 
+x-enterprise-relay-environment: &enterprise-relay-environment
+  ENTERPRISE_RELAY_ENABLED: ${ENTERPRISE_RELAY_ENABLED:-false}
+  ENTERPRISE_RELAY_ALLOWED_MODELS: ${ENTERPRISE_RELAY_ALLOWED_MODELS:-}
+  ENTERPRISE_RELAY_ALLOWED_USER_IDS: ${ENTERPRISE_RELAY_ALLOWED_USER_IDS:-}
+  ENTERPRISE_RELAY_SESSION_TTL_SECONDS: ${ENTERPRISE_RELAY_SESSION_TTL_SECONDS:-28800}
+  ENTERPRISE_RELAY_LEASE_SECONDS: ${ENTERPRISE_RELAY_LEASE_SECONDS:-90}
+  ENTERPRISE_GENERATION_TTL_SECONDS: ${ENTERPRISE_GENERATION_TTL_SECONDS:-86400}
+  ENTERPRISE_GENERATION_RETENTION_DAYS: ${ENTERPRISE_GENERATION_RETENTION_DAYS:-7}
+  ENTERPRISE_MAX_ACTIVE_GENERATIONS_PER_USER: ${ENTERPRISE_MAX_ACTIVE_GENERATIONS_PER_USER:-3}
+  ENTERPRISE_DAILY_GENERATIONS_PER_USER: ${ENTERPRISE_DAILY_GENERATIONS_PER_USER:-100}
+  ENTERPRISE_MAX_PROMPT_CHARS: ${ENTERPRISE_MAX_PROMPT_CHARS:-100000}
+  ENTERPRISE_MAX_RESULT_CHARS: ${ENTERPRISE_MAX_RESULT_CHARS:-200000}
+
 services:
   ai-gateway:
     image: ${GATEWAY_IMAGE:-ghcr.io/antoroute/obsidian-local-ai-platform-ai-gateway:main}
     pull_policy: always
     init: true
     environment:
+      <<: *enterprise-relay-environment
       AI_GATEWAY_HOST: 0.0.0.0
       AI_GATEWAY_PORT: 8000
       AI_GATEWAY_LOG_LEVEL: ${AI_GATEWAY_LOG_LEVEL:-info}
@@ -100,6 +114,43 @@ services:
     pids_limit: 256
     cpus: "1.0"
     mem_limit: 1g
+    restart: unless-stopped
+
+  relay-maintenance:
+    image: ${GATEWAY_IMAGE:-ghcr.io/antoroute/obsidian-local-ai-platform-ai-gateway:main}
+    pull_policy: always
+    profiles:
+      - enterprise-relay
+    init: true
+    # Override the image CMD: only the gateway runs Alembic migrations.
+    command: ["python", "-m", "app.generation_maintenance", "--loop"]
+    environment:
+      <<: *enterprise-relay-environment
+      AI_GATEWAY_LOG_LEVEL: ${AI_GATEWAY_LOG_LEVEL:-info}
+      AI_GATEWAY_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-obsidian_ai}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-obsidian_ai}
+    depends_on:
+      ai-gateway:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - ai_backend
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.generation_maintenance", "--check"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    pids_limit: 64
+    cpus: "0.25"
+    mem_limit: 256m
     restart: unless-stopped
 
   whisper-worker:
