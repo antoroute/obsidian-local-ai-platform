@@ -177,7 +177,12 @@ def test_notes_summarize_fake_provider_returns_deterministic_markdown(client: Te
 
 
 def test_no_generic_ollama_proxy_route_exists(client: TestClient) -> None:
-    paths = {route.path for route in app.routes}
+    # Recent FastAPI versions keep included routers as wrappers without .path.
+    # Inspect the public schema and probe common proxy paths, including hidden routes.
+    paths = set(app.openapi()["paths"])
 
     assert "/v1/ollama" not in paths
     assert not any(path.startswith("/v1/ollama/") for path in paths)
+    for path in ["/v1/ollama", "/v1/ollama/api/generate", "/v1/ollama/api/chat", "/v1/ollama/api/tags"]:
+        assert client.get(path).status_code == 404
+        assert client.post(path, json={}).status_code == 404
