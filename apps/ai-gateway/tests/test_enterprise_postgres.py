@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -20,7 +20,9 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 
 from app.config import get_settings
 from app.database import Base, get_db_session
+from app import generation_routes
 from app.generation_routes import router
+from app.generation_store import lock_user
 from app.models import ApiToken, GenerationRun, GenerationStep, GenerationUserState, RelaySession
 from app.token_repository import create_api_token
 
@@ -39,15 +41,22 @@ def pg_relay(monkeypatch):
     monkeypatch.setenv("USAGE_QUOTAS_ENABLED", "false")
     get_settings.cache_clear()
     schema = "relay_test_" + uuid4().hex
-    admin_engine = create_engine(POSTGRES_URL)
+    # A regression must fail with a useful database exception rather than wait
+    # indefinitely for a transaction whose finalizer cannot reach the event loop.
+    connect_args = {"connect_timeout": 5, "options": "-c lock_timeout=10000 -c statement_timeout=20000"}
+    admin_engine = create_engine(POSTGRES_URL, connect_args=connect_args)
     with admin_engine.begin() as connection:
         connection.execute(CreateSchema(schema))
-    engine = create_engine(POSTGRES_URL, execution_options={"schema_translate_map": {None: schema}})
+    engine = create_engine(POSTGRES_URL, connect_args=connect_args, execution_options={"schema_translate_map": {None: schema}})
     tables = [model.__table__ for model in (ApiToken, GenerationUserState, RelaySession, GenerationRun, GenerationStep)]
     Base.metadata.create_all(engine, tables=tables)
     sessions = sessionmaker(bind=engine, expire_on_commit=False)
     application = FastAPI()
     application.include_router(router)
+
+    @application.get("/v1/health")
+    async def event_loop_probe():
+        return {"status": "ok"}
 
     def database():
         with sessions() as session:
@@ -106,6 +115,55 @@ def test_postgres_concurrent_distinct_creates_cannot_exceed_active_limit(pg_rela
     assert sorted(response.status_code for response in responses) == [202, 429, 429, 429]
     with pg_relay.sessions() as session:
         assert session.scalar(select(func.count()).select_from(GenerationRun)) == 1
+    # A rejected request must roll its mutex back immediately. Repeat contention
+    # after capacity is exhausted to exercise the exception path, not just the
+    # successful first commit.
+    for _ in range(3):
+        rejected = parallel(4, lambda _: pg_relay.client.post("/v1/generations", headers=pg_relay.headers, json=payload(pg_relay)))
+        assert [response.status_code for response in rejected] == [429] * 4
+    assert pg_relay.client.get("/v1/health").json() == {"status": "ok"}
+
+
+@pytest.mark.parametrize("operation", ["create", "claim"])
+def test_postgres_waiting_for_user_mutex_keeps_event_loop_responsive(pg_relay, monkeypatch, operation):
+    """Reproduce loop starvation deterministically, without depending on races.
+
+    A separate connection owns the user mutex. The request under test reaches
+    its blocking lock, then an async health request must finish while that lock
+    remains held. The finally clause always releases the external lock before
+    waiting for either request thread, including when testing the broken code.
+    """
+    response = pg_relay.client.post("/v1/generations", headers=pg_relay.headers, json=payload(pg_relay))
+    assert response.status_code == 202, response.text
+    run_id = response.json()["id"]
+    reached_mutex = Event()
+    original_lock_user = generation_routes.lock_user
+
+    def observed_lock_user(session, user_id):
+        reached_mutex.set()
+        return original_lock_user(session, user_id)
+
+    monkeypatch.setattr(generation_routes, "lock_user", observed_lock_user)
+
+    def blocked_request():
+        if operation == "create":
+            return pg_relay.client.post("/v1/generations", headers=pg_relay.headers, json=payload(pg_relay))
+        return pg_relay.client.post(f"/v1/relay/sessions/{pg_relay.relay['session_id']}/claim", headers=pg_relay.proof, json={"run_ids": [run_id], "wait_seconds": 0})
+
+    with pg_relay.sessions() as owner:
+        lock_user(owner, USER)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            pending = executor.submit(blocked_request)
+            try:
+                assert reached_mutex.wait(timeout=5), "Request never reached the user mutex"
+                probe = executor.submit(pg_relay.client.get, "/v1/health")
+                response = probe.result(timeout=2)
+                assert response.status_code == 200 and response.json() == {"status": "ok"}
+                assert not pending.done(), "The request must still wait for the held database mutex"
+            finally:
+                owner.rollback()
+            response = pending.result(timeout=10)
+            assert response.status_code == (202 if operation == "create" else 200), response.text
 
 
 def test_postgres_concurrent_claim_and_duplicate_delivery_are_serialized(pg_relay):
