@@ -1,5 +1,7 @@
 import { App, Modal, Notice, Platform, Setting, TFile, normalizePath, requestUrl } from "obsidian";
 import { EnterpriseRelayClient, type GenerationStatus } from "./enterprise-relay";
+import { generationMilestone, isTaskVisible } from "./task-progress";
+import { renderTaskProgress } from "./task-progress-view";
 
 type GenerationKind = "assistant" | "note_summary" | "meeting" | "meeting_from_job" | "vault_answer";
 type Provider = "ollama" | "enterprise_relay";
@@ -11,6 +13,7 @@ interface LlmHost {
   getPersonalModel(): string;
   setPersonalModel(model: string): Promise<void>;
   getOutputFolder(): string;
+  isGenerationTracked?(id: string): boolean;
 }
 
 const STATE_LABELS: Record<string, string> = {
@@ -39,6 +42,9 @@ export class LlmUiController {
   private historyBusy = false;
   private historyUnsupportedUntil = 0;
   private executing = new Set<string>();
+  private historyExpanded = false;
+  private historySignatures = new WeakMap<HTMLElement, string>();
+  private busyHistoryActions = new Set<string>();
 
   constructor(private readonly host: LlmHost) {}
 
@@ -174,15 +180,16 @@ export class LlmUiController {
     container.createEl("p", { text: "Le contexte utile est envoyé à HeadMind ; les réponses reviennent au serveur personnel. Le serveur doit aussi autoriser le modèle choisi. Aucune bascule automatique vers Ollama." });
   }
 
-  async execute(kind: GenerationKind, input: object): Promise<string> {
+  async execute(kind: GenerationKind, input: object, onProgress?: (run: GenerationStatus) => void): Promise<string> {
     const model = this.enterpriseModel;
     if (!model) throw new Error("Choisis un modèle entreprise dans Note Compagnon avant l’envoi.");
     const relay = this.client();
     const run = await relay.startGeneration(kind, { ...input, model }, model);
+    onProgress?.(run);
     this.executing.add(run.id);
     new Notice(`Entreprise · ${model}. Traitement disponible dans le centre de tâches.`);
     try {
-      await relay.waitForGeneration(run.id);
+      await relay.waitForGeneration(run.id, onProgress);
       const result = await relay.getResult(run.id);
       return JSON.stringify({ ...(result as object), generation_id: run.id, provider: "enterprise_relay" });
     } finally {
@@ -195,6 +202,24 @@ export class LlmUiController {
     const container = parent.createDiv({ cls: "note-compagnon-generation-list" });
     this.historyContainers.add(container);
     this.drawHistory(container);
+  }
+
+  setHistoryExpanded(expanded: boolean): void {
+    this.historyExpanded = expanded;
+    this.redrawHistory();
+  }
+
+  redrawHistory(): void {
+    for (const container of this.historyContainers) {
+      if (!container.isConnected) { this.historyContainers.delete(container); continue; }
+      this.drawHistory(container);
+    }
+  }
+
+  async cancelGeneration(id: string): Promise<GenerationStatus> {
+    const result = await this.client().cancel(id);
+    await this.refreshHistory();
+    return result;
   }
 
   async refreshHistory(): Promise<void> {
@@ -213,20 +238,33 @@ export class LlmUiController {
   }
 
   private drawHistory(container: HTMLElement): void {
+    const visible = this.history.filter(run => !this.host.isGenerationTracked?.(run.id)
+      && isTaskVisible(run.status, run.updated_at, this.historyExpanded));
+    const signature = JSON.stringify([visible, [...this.executing], [...this.busyHistoryActions]]);
+    if (this.historySignatures.get(container) === signature) return;
+    this.historySignatures.set(container, signature);
     container.empty();
-    if (!this.history.length) return;
+    if (!visible.length) return;
     container.createEl("h4", { text: "Générations entreprise" });
-    for (const run of this.history) {
+    for (const run of visible) {
       const row = container.createDiv({ cls: "note-compagnon-generation" });
       row.createEl("strong", { text: `${run.model_id} · ${run.id.slice(0, 8)}` });
-      row.createEl("p", { text: `${STATE_LABELS[run.status] ?? run.status} · ${run.progress.completed}/${run.progress.total} étapes` });
+      const stage = generationMilestone(run);
+      renderTaskProgress(row, run.status === "completed"
+        ? { percent: 100, phase: "Résultat prêt sur le serveur", detail: "Ouvrir / enregistrer pour le retrouver dans le coffre." }
+        : { ...stage, phase: STATE_LABELS[run.status] ?? stage.phase });
+      row.createEl("p", { text: `${run.progress.completed}/${run.progress.total} étapes de génération terminées` });
       if (run.error) row.createEl("p", { text: run.error.message });
       const button = (label: string, action: () => Promise<void>) => {
         const element = row.createEl("button", { text: label });
+        const key = `${run.id}:${label}`;
+        element.disabled = this.busyHistoryActions.has(key);
         element.addEventListener("click", async () => {
+          if (this.busyHistoryActions.has(key)) return;
+          this.busyHistoryActions.add(key);
           element.disabled = true;
           try { await this.withNotice(action); }
-          finally { element.disabled = false; await this.refreshHistory(); }
+          finally { this.busyHistoryActions.delete(key); await this.refreshHistory(); this.redrawHistory(); }
         });
       };
       if (run.status === "completed" && !this.executing.has(run.id)) {

@@ -56,6 +56,49 @@ the plugin does not disable certificate checks or bypass network controls.
 The initial pilot buffers the complete response rather than displaying tokens
 progressively. Mobile and older gateways retain the existing personal workflow.
 
+The professional-PC curl example confirms the completion contract for
+`gpt-oss-120b`: `POST /api/chat/completions`, Bearer authentication and
+`{model, messages, stream: false}`. A regression fixture covers the supplied
+response, including nullable fields and `reasoning`; only the final `content`
+is used. Model discovery still uses `GET /api/models` and is dynamic, so future
+models can appear without rebuilding the plugin. Each exact model also needs
+gateway authorization. The curl example does not validate the discovery endpoint
+or the complete Obsidian relay.
+
+## Task center (0.3.1)
+
+The active view shows ongoing tasks and tasks finished within the last 15 seconds.
+**Afficher l’historique** also shows older completed, failed and cancelled tasks;
+archiving changes the display only, without deleting a server job or vault note.
+The audio history reads the latest 50 jobs. Generations remain recoverable under
+the gateway's retention policy. The local workflow history keeps up to 50 finished
+entries in memory for the current Obsidian session; it is not saved in `data.json`
+or synchronized to another PC. After restart, server audio jobs and enterprise
+generations remain the source for recovery.
+
+An audio-to-minutes workflow has one local progress row covering the whole
+operation, rather than reporting the minutes as complete when Whisper finishes:
+
+- 5%: upload in progress, awaiting server confirmation (not a byte counter).
+- 10%: audio accepted by the gateway.
+- 10–40%: measured transcription/diarization progress from the worker.
+- 45%: transcript saved; 50%: text request prepared.
+- Personal mode: 60% while the synchronous gateway processes the request. The
+  plugin cannot observe separate server parsing, RAG retrieval or token generation
+  milestones through these existing endpoints.
+- Enterprise mode: 50–90% based on completed generation steps, with explicit
+  waiting/authentication/network states.
+- 90%: response received and validated; 95%: writing the note; 100%: note saved.
+
+These are weighted workflow milestones, not an estimate of remaining time.
+Elapsed time is shown; the bar never advances merely because time passes.
+Summaries, assistant/selection actions and vault questions also have progress
+entries. Indexing uses the real processed/total note count and shows any errors.
+Server-only transcription rows clearly identify their percentage as audio-only.
+Cancellation stays available for the active audio/enterprise stage; a synchronous
+personal text call has no new cancellation API. Pending action buttons stay
+disabled across refreshes and unchanged cards are not rebuilt each second.
+
 ## Configuration
 
 Configure these settings in Obsidian:

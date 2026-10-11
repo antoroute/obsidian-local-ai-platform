@@ -134,10 +134,11 @@ export class EnterpriseRelayClient {
     this.ensureAlive();
     return this.gateway<T>(`/v1/generations/${id(runId)}/result`, { signal: this.lifetime.signal });
   }
-  async waitForGeneration(runId: string): Promise<GenerationStatus> {
+  async waitForGeneration(runId: string, onProgress?: (run: GenerationStatus) => void): Promise<GenerationStatus> {
     for (;;) {
       this.ensureAlive();
       const run = await this.getGeneration(runId);
+      onProgress?.(run);
       if (run.status === "completed") return run;
       if (TERMINAL.has(run.status) || PAUSED.has(run.status)) {
         const pausedCode = run.error?.code;

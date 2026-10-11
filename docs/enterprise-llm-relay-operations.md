@@ -28,6 +28,15 @@ Le connecteur utilise les routes documentées [Open WebUI](https://docs.openwebu
 `GET /api/models` et `POST /api/chat/completions`, avec authentification Bearer.
 Il accepte aussi les réponses SSE si l'instance impose le streaming.
 
+L'exemple curl fourni depuis le PC professionnel le 11 octobre 2026 confirme
+l'identifiant `gpt-oss-120b` et le contrat `model` / `messages` / `stream: false`.
+La réponse contenant `content: "OK"`, `finish_reason: "stop"` et des champs
+optionnels nuls est couverte par un test du connecteur. Le champ `reasoning`
+n'est pas utilisé. Cet exemple valide l'appel de génération ; la découverte
+`GET /api/models` et le relais complet dans Obsidian restent à tester. Garder
+les listes de modèles explicites : les modèles futurs seront découverts côté PC
+mais devront aussi être autorisés côté gateway.
+
 ## Configuration serveur
 
 Les exemples complets sont dans [`.env.homelab.example`](../.env.homelab.example)

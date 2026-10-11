@@ -17,6 +17,9 @@
   requestUrl,
 } from "obsidian";
 import { LlmUiController } from "./llm-ui";
+import { EnterpriseError } from "./enterprise-relay";
+import { TaskTracker, audioMilestone, generationMilestone, isTaskVisible, type TaskKind } from "./task-progress";
+import { renderTaskProgress } from "./task-progress-view";
 
 const DASHBOARD_VIEW_TYPE = "notre-compagnon-dashboard";
 const DEFAULT_TEMPLATE_FILE = "note-summary-fr.md";
@@ -31,7 +34,7 @@ const DEFAULT_RECORDING_EXTENSION = ".webm";
 const DEFAULT_RECORDING_MIME_TYPE = "audio/webm";
 const SUPPORTED_AUDIO_EXTENSIONS = new Set([".wav", ".mp3", ".m4a", ".webm", ".ogg"]);
 const LEGACY_DEFAULT_MODELS = new Set(["qwen2.5:7b", "qwen2.5:14b"]);
-const PLUGIN_BUILD_ID = "0.3.0-enterprise-relay";
+const PLUGIN_BUILD_ID = "0.3.1-task-progress";
 const RECOMMENDED_TEMPLATE_VERSION = 2;
 type TemplateInstallSet = "minimal" | "fr" | "en" | "all";
 type TemplatePurpose = "note_summary" | "meeting_summary";
@@ -795,6 +798,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
 export default class LocalAiPlatformPlugin extends Plugin {
   settings: PluginSettings = DEFAULT_SETTINGS;
   llm!: LlmUiController;
+  readonly tasks = new TaskTracker();
   activeRecording: ActiveRecordingSession | null = null;
   audioInputDevices: AudioInputDeviceChoice[] = [{ deviceId: "", label: "Default microphone" }];
   ragIndexProgress: VaultIndexProgress = createIdleVaultIndexProgress();
@@ -813,6 +817,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       getPersonalModel: () => this.settings.defaultModel || DEFAULT_MODEL,
       setPersonalModel: async model => { this.settings.defaultModel = model; await this.saveSettings(); },
       getOutputFolder: () => this.getOutputFolder(),
+      isGenerationTracked: id => this.tasks.list().some(task => task.generationId === id && task.status === "running"),
     });
     console.info("Note Compagnon loaded", { build: PLUGIN_BUILD_ID });
 
@@ -981,6 +986,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
   }
 
   async summarizeCurrentNote(): Promise<void> {
+    let taskId: string | undefined;
     try {
       this.validateCoreSettings();
 
@@ -1004,17 +1010,22 @@ export default class LocalAiPlatformPlugin extends Plugin {
         model: this.getDefaultModel(),
       };
 
+      taskId = this.tasks.begin("summary", `Résumé · ${activeFile.basename}`);
       new Notice("Note Compagnon is generating the summary...");
-      const result = await this.requestSummary(apiBaseUrl, apiToken, payload);
+      const result = await this.requestSummary(apiBaseUrl, apiToken, payload, taskId);
+      this.tasks.update(taskId, { percent: 95, phase: "Enregistrement dans le coffre", detail: "" });
       const outputFile = await this.writeSummaryNote(activeFile, result, templateChoice);
 
+      this.tasks.finish(taskId, outputFile.path);
       new Notice(`Summary created: ${outputFile.path}`);
     } catch (error) {
+      if (taskId) this.tasks.fail(taskId, "Résumé interrompu. Consulte le message d’erreur.");
       this.showUserFacingError(error);
     }
   }
 
   async generateMeetingMinutesFromAudioFile(): Promise<void> {
+    let taskId: string | undefined;
     try {
       this.validateCoreSettings();
 
@@ -1036,15 +1047,18 @@ export default class LocalAiPlatformPlugin extends Plugin {
       });
       const templateChoice = await this.chooseTemplate("meeting_summary");
       const generationMode = await chooseMeetingGenerationMode(this.app);
+      taskId = this.tasks.begin("meeting", `Compte rendu · ${metadata.title}`);
 
       const savedAudio = await this.resolveAudioFileForVault(audioFile);
       new Notice(savedAudio.reused ? `Audio deja dans le vault: ${savedAudio.file.path}` : `Audio saved: ${savedAudio.file.path}`);
 
       new Notice(`Uploading audio: ${savedAudio.file.name}`);
       const uploadFile = createFileFromBlob(savedAudio.blob, savedAudio.file.name, audioFile.type || guessAudioMimeType(savedAudio.file.name));
+      this.tasks.update(taskId, { percent: 5, phase: "Envoi de l’audio", detail: "Envoi en cours · confirmation du serveur attendue." });
       const queuedJob = await this.uploadAudio(apiBaseUrl, apiToken, uploadFile);
+      this.tasks.update(taskId, { percent: 10, phase: "Audio reçu par le serveur", detail: "Transcription en attente.", jobId: queuedJob.job_id });
       new Notice("Audio uploaded.");
-      const completedJob = await this.pollAudioJob(apiBaseUrl, apiToken, queuedJob.job_id);
+      const completedJob = await this.pollAudioJob(apiBaseUrl, apiToken, queuedJob.job_id, taskId);
       if (completedJob.status !== "completed") {
         throw new UserFacingError("The audio job did not complete successfully.");
       }
@@ -1054,6 +1068,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
       const transcriptFile = await this.saveTranscriptToVaultWithFallback(transcriptResult, savedAudio.file, metadata.sourceNoteFile);
       new Notice(`Transcription saved: ${transcriptFile.path}`);
 
+      this.tasks.update(taskId, { percent: 45, phase: "Transcription enregistrée", detail: "Préparation du compte rendu." });
       new Notice(formatMeetingGenerationNotice(generationMode));
       const result = await this.requestMeetingFromJob(apiBaseUrl, apiToken, {
         job_id: queuedJob.job_id,
@@ -1064,8 +1079,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
         model: this.getDefaultModel(),
         output_language: metadata.outputLanguage,
         generation_mode: generationMode,
-      });
+      }, taskId);
 
+      this.tasks.update(taskId, { percent: 95, phase: "Enregistrement du compte rendu", detail: "" });
       const outputFile = await this.writeMeetingNote({
         response: result,
         templateChoice,
@@ -1077,8 +1093,10 @@ export default class LocalAiPlatformPlugin extends Plugin {
         generationMode,
         outputLanguage: metadata.outputLanguage,
       });
+      this.tasks.finish(taskId, outputFile.path);
       new Notice(`Minutes created: ${outputFile.path}`);
     } catch (error) {
+      if (taskId) this.tasks.fail(taskId, "Compte rendu interrompu. La transcription peut rester récupérable dans l’historique.");
       this.showUserFacingError(error);
     }
   }
@@ -1165,6 +1183,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
   }
 
   async stopRecordingAndGenerateMeetingMinutes(): Promise<void> {
+    let taskId: string | undefined;
     try {
       this.validateCoreSettings();
       this.getMeetingsFolder();
@@ -1186,20 +1205,24 @@ export default class LocalAiPlatformPlugin extends Plugin {
       const manualNotes = await this.app.vault.read(sourceNote);
       const templateChoice = await this.chooseTemplate("meeting_summary");
       const generationMode = await chooseMeetingGenerationMode(this.app);
+      taskId = this.tasks.begin("meeting", `Compte rendu · ${recording.title}`);
 
       const apiBaseUrl = this.getApiBaseUrl();
       const apiToken = this.getApiToken();
       new Notice(`Uploading audio: ${savedAudio.file.name}`);
       const uploadFile = createFileFromBlob(savedAudio.blob, savedAudio.file.name, recording.mimeType);
+      this.tasks.update(taskId, { percent: 5, phase: "Envoi de l’audio", detail: "Envoi en cours · confirmation du serveur attendue." });
       const queuedJob = await this.uploadAudio(apiBaseUrl, apiToken, uploadFile);
+      this.tasks.update(taskId, { percent: 10, phase: "Audio reçu par le serveur", detail: "Transcription en attente.", jobId: queuedJob.job_id });
       new Notice("Audio uploaded.");
-      await this.pollAudioJob(apiBaseUrl, apiToken, queuedJob.job_id);
+      await this.pollAudioJob(apiBaseUrl, apiToken, queuedJob.job_id, taskId);
       const transcriptResult = await this.requestJobResult(apiBaseUrl, apiToken, queuedJob.job_id);
       this.ensureUsableTranscriptResult(transcriptResult);
       this.reportTranscriptRetrieved(transcriptResult);
       const transcriptFile = await this.saveTranscriptToVaultWithFallback(transcriptResult, savedAudio.file, sourceNote);
       await this.completeMeetingSourceNote(recording, savedAudio.file, transcriptFile);
 
+      this.tasks.update(taskId, { percent: 45, phase: "Transcription enregistrée", detail: "Préparation du compte rendu." });
       new Notice(formatMeetingGenerationNotice(generationMode));
       const result = await this.requestMeetingFromJob(apiBaseUrl, apiToken, {
         job_id: queuedJob.job_id,
@@ -1210,8 +1233,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
         model: this.getDefaultModel(),
         output_language: this.getOutputLanguage(),
         generation_mode: generationMode,
-      });
+      }, taskId);
 
+      this.tasks.update(taskId, { percent: 95, phase: "Enregistrement du compte rendu", detail: "" });
       const outputFile = await this.writeMeetingNote({
         response: result,
         templateChoice,
@@ -1225,8 +1249,10 @@ export default class LocalAiPlatformPlugin extends Plugin {
         generatedAt: new Date(),
       });
 
+      this.tasks.finish(taskId, outputFile.path);
       new Notice(`Minutes created: ${outputFile.path}`);
     } catch (error) {
+      if (taskId) this.tasks.fail(taskId, "Compte rendu interrompu. La transcription peut rester récupérable dans l’historique.");
       this.showUserFacingError(error);
     }
   }
@@ -1751,10 +1777,30 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return parsed;
   }
 
-  async requestSummary(apiBaseUrl: string, apiToken: string, payload: SummarizeRequestPayload): Promise<SummarizeResponsePayload> {
-    if (this.llm.isEnterprise) {
-      return this.parseSummaryResponse(await this.llm.execute("note_summary", payload));
+  private async runTextTask<T>(kind: TaskKind, title: string, parentId: string | undefined, action: (id: string) => Promise<T>): Promise<T> {
+    const taskId = parentId ?? this.tasks.begin(kind, title);
+    this.tasks.update(taskId, { percent: 50, phase: "Demande préparée", detail: this.llm.label });
+    try {
+      const result = await action(taskId);
+      this.tasks.update(taskId, { percent: 90, phase: "Réponse reçue et validée", detail: "" });
+      if (!parentId) this.tasks.finish(taskId);
+      return result;
+    } catch (error) {
+      if (error instanceof EnterpriseError && error.code === "cancelled") this.tasks.cancel(taskId);
+      else this.tasks.fail(taskId, "Traitement interrompu. Consulte le message d’erreur ou reprends depuis l’historique.");
+      throw error;
     }
+  }
+
+  async requestSummary(apiBaseUrl: string, apiToken: string, payload: SummarizeRequestPayload, taskId?: string): Promise<SummarizeResponsePayload> {
+    return this.runTextTask("summary", payload.title || "Résumé de note", taskId, id => this.requestSummaryRaw(apiBaseUrl, apiToken, payload, id));
+  }
+
+  private async requestSummaryRaw(apiBaseUrl: string, apiToken: string, payload: SummarizeRequestPayload, taskId: string): Promise<SummarizeResponsePayload> {
+    if (this.llm.isEnterprise) {
+      return this.parseSummaryResponse(await this.llm.execute("note_summary", payload, run => this.tasks.update(taskId, { ...generationMilestone(run), generationId: run.id })));
+    }
+    this.tasks.update(taskId, { percent: 60, phase: "Traitement serveur en cours", detail: "Génération du texte · progression interne du modèle indisponible." });
     const responseText = await this.performJsonRequest({
       apiBaseUrl,
       apiToken,
@@ -1776,14 +1822,15 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return this.parseSummaryResponse(responseText);
   }
 
-  async requestMeetingFromJob(
-    apiBaseUrl: string,
-    apiToken: string,
-    payload: MeetingGenerateFromJobPayload,
-  ): Promise<MeetingGenerateFromJobResponsePayload> {
+  async requestMeetingFromJob(apiBaseUrl: string, apiToken: string, payload: MeetingGenerateFromJobPayload, taskId?: string): Promise<MeetingGenerateFromJobResponsePayload> {
+    return this.runTextTask("meeting", payload.title || "Compte rendu", taskId, id => this.requestMeetingFromJobRaw(apiBaseUrl, apiToken, payload, id));
+  }
+
+  private async requestMeetingFromJobRaw(apiBaseUrl: string, apiToken: string, payload: MeetingGenerateFromJobPayload, taskId: string): Promise<MeetingGenerateFromJobResponsePayload> {
     if (this.llm.isEnterprise) {
-      return this.parseMeetingGenerateFromJobResponse(await this.llm.execute("meeting_from_job", payload));
+      return this.parseMeetingGenerateFromJobResponse(await this.llm.execute("meeting_from_job", payload, run => this.tasks.update(taskId, { ...generationMilestone(run), generationId: run.id })));
     }
+    this.tasks.update(taskId, { percent: 60, phase: "Traitement serveur en cours", detail: "Génération du texte · progression interne du modèle indisponible." });
     const responseText = await this.performJsonRequest({
       apiBaseUrl,
       apiToken,
@@ -1828,19 +1875,20 @@ export default class LocalAiPlatformPlugin extends Plugin {
     return this.parseJobResultResponse(responseText);
   }
 
-  async requestAssistantChat(
-    apiBaseUrl: string,
-    apiToken: string,
-    payload: AssistantChatRequestPayload,
-  ): Promise<AssistantChatResponsePayload> {
+  async requestAssistantChat(apiBaseUrl: string, apiToken: string, payload: AssistantChatRequestPayload, taskId?: string): Promise<AssistantChatResponsePayload> {
+    return this.runTextTask("assistant", ({chat: "Assistant", correct: "Correction", rewrite: "Reformulation", summarize: "Résumé de sélection"})[payload.mode], taskId, id => this.requestAssistantChatRaw(apiBaseUrl, apiToken, payload, id));
+  }
+
+  private async requestAssistantChatRaw(apiBaseUrl: string, apiToken: string, payload: AssistantChatRequestPayload, taskId: string): Promise<AssistantChatResponsePayload> {
     if (this.llm.isEnterprise) {
-      return this.parseAssistantChatResponse(await this.llm.execute("assistant", payload));
+      return this.parseAssistantChatResponse(await this.llm.execute("assistant", payload, run => this.tasks.update(taskId, { ...generationMilestone(run), generationId: run.id })));
     }
     console.debug("Note Compagnon assistant request", {
       endpoint: "/v1/assistant/chat",
       mode: payload.mode,
       output_language: payload.output_language,
     });
+    this.tasks.update(taskId, { percent: 60, phase: "Traitement serveur en cours", detail: "Génération du texte · progression interne du modèle indisponible." });
     const responseText = await this.performJsonRequest({
       apiBaseUrl,
       apiToken,
@@ -1884,6 +1932,10 @@ export default class LocalAiPlatformPlugin extends Plugin {
   }
 
   async askVault(question: string): Promise<VaultAskResponsePayload> {
+    return this.runTextTask("vault", "Question au coffre", undefined, id => this.askVaultRaw(question, id));
+  }
+
+  private async askVaultRaw(question: string, taskId: string): Promise<VaultAskResponsePayload> {
     if (!this.settings.ragEnabled) {
       throw new UserFacingError("La connaissance du vault est desactivee dans les reglages.");
     }
@@ -1891,8 +1943,9 @@ export default class LocalAiPlatformPlugin extends Plugin {
       return this.parseVaultAskResponse(await this.llm.execute("vault_answer", {
         vault_id: this.getVaultId(), workspace_id: this.getRagWorkspaceId(), question,
         top_k: 8, answer_language: "same_as_input", debug: true,
-      }));
+      }, run => this.tasks.update(taskId, { ...generationMilestone(run), generationId: run.id })));
     }
+    this.tasks.update(taskId, { percent: 60, phase: "Recherche et génération en cours", detail: "Recherche RAG et réponse du modèle · attente du serveur." });
     const responseText = await this.performJsonRequest({
       apiBaseUrl: this.getApiBaseUrl(),
       apiToken: this.getApiToken(),
@@ -2571,7 +2624,7 @@ export default class LocalAiPlatformPlugin extends Plugin {
     }
   }
 
-  async pollAudioJob(apiBaseUrl: string, apiToken: string, jobId: string): Promise<JobStatusResponsePayload> {
+  async pollAudioJob(apiBaseUrl: string, apiToken: string, jobId: string, taskId?: string): Promise<JobStatusResponsePayload> {
     const startedAt = Date.now();
     let lastStatus: JobStatusResponsePayload["status"] | null = null;
     let lastPhase: string | null = null;
@@ -2593,6 +2646,10 @@ export default class LocalAiPlatformPlugin extends Plugin {
       });
 
       const payload = this.parseJobStatusResponse(responseText);
+      if (taskId) {
+        this.tasks.update(taskId, audioMilestone(payload));
+        if (payload.status === "cancelled") this.tasks.cancel(taskId, "Transcription annulée.");
+      }
       if (payload.status !== lastStatus || payload.phase !== lastPhase) {
         lastStatus = payload.status;
         lastPhase = payload.phase;
@@ -2674,36 +2731,45 @@ export default class LocalAiPlatformPlugin extends Plugin {
     });
     const templateChoice = await this.chooseTemplate("meeting_summary");
     const generationMode = await chooseMeetingGenerationMode(this.app);
-    const transcriptResult = await this.requestJobResult(this.getApiBaseUrl(), this.getApiToken(), job.job_id);
-    this.ensureUsableTranscriptResult(transcriptResult);
-    const transcriptFile = await this.trySaveExternalAudioTranscriptToVault(
-      transcriptResult,
-      fallbackName,
-      metadata.sourceNoteFile,
-    );
-    new Notice(formatMeetingGenerationNotice(generationMode));
-    const response = await this.requestMeetingFromJob(this.getApiBaseUrl(), this.getApiToken(), {
-      job_id: job.job_id,
-      title: metadata.title,
-      manual_notes: metadata.manualNotes,
-      participants: [],
-      template: this.prepareTemplateForRequest(templateChoice, "meeting_summary"),
-      model: this.getDefaultModel(),
-      output_language: metadata.outputLanguage,
-      generation_mode: generationMode,
-    });
-    const outputFile = await this.writeMeetingNote({
-      response,
-      templateChoice,
-      sourceAudioName: fallbackName,
-      sourceNoteFile: metadata.sourceNoteFile,
-      transcriptFile,
-      transcriptResult,
-      generationMode,
-      outputLanguage: metadata.outputLanguage,
-    });
-    new Notice(`Compte rendu cree: ${outputFile.path}`);
-    return outputFile;
+    const taskId = this.tasks.begin("meeting", `Compte rendu · ${metadata.title}`);
+    this.tasks.update(taskId, { jobId: job.job_id, percent: 40, phase: "Récupération de la transcription", detail: "" });
+    try {
+      const transcriptResult = await this.requestJobResult(this.getApiBaseUrl(), this.getApiToken(), job.job_id);
+      this.ensureUsableTranscriptResult(transcriptResult);
+      const transcriptFile = await this.trySaveExternalAudioTranscriptToVault(
+        transcriptResult,
+        fallbackName,
+        metadata.sourceNoteFile,
+      );
+      new Notice(formatMeetingGenerationNotice(generationMode));
+      const response = await this.requestMeetingFromJob(this.getApiBaseUrl(), this.getApiToken(), {
+        job_id: job.job_id,
+        title: metadata.title,
+        manual_notes: metadata.manualNotes,
+        participants: [],
+        template: this.prepareTemplateForRequest(templateChoice, "meeting_summary"),
+        model: this.getDefaultModel(),
+        output_language: metadata.outputLanguage,
+        generation_mode: generationMode,
+      }, taskId);
+      this.tasks.update(taskId, { percent: 95, phase: "Enregistrement du compte rendu", detail: "" });
+      const outputFile = await this.writeMeetingNote({
+        response,
+        templateChoice,
+        sourceAudioName: fallbackName,
+        sourceNoteFile: metadata.sourceNoteFile,
+        transcriptFile,
+        transcriptResult,
+        generationMode,
+        outputLanguage: metadata.outputLanguage,
+      });
+      this.tasks.finish(taskId, outputFile.path);
+      new Notice(`Compte rendu cree: ${outputFile.path}`);
+      return outputFile;
+    } catch (error) {
+      this.tasks.fail(taskId, "Reprise interrompue. La transcription reste disponible dans l’historique.");
+      throw error;
+    }
   }
 
   async performJsonRequest(input: {
@@ -3304,6 +3370,14 @@ class NoteCompagnonDashboardView extends ItemView {
   private jobRefreshTimer: number | null = null;
   private jobListEl: HTMLElement | null = null;
   private jobs: JobStatusResponsePayload[] = [];
+  private showTaskHistory = false;
+  private jobsRefreshing = false;
+  private jobsError = "";
+  private stopTaskSubscription: (() => void) | null = null;
+  private vaultProgressEl: HTMLElement | null = null;
+  private taskListSignature = "";
+  private busyTaskActions = new Set<string>();
+  private elapsedLabels = new Map<HTMLElement, { startedAt: number; finishedAt?: number }>();
 
   constructor(leaf: WorkspaceLeaf, plugin: LocalAiPlatformPlugin) {
     super(leaf);
@@ -3319,18 +3393,27 @@ class NoteCompagnonDashboardView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.stopTaskSubscription = this.plugin.tasks.subscribe(() => this.renderJobList());
     await this.render();
     await this.refreshJobs(false);
     await this.refreshRuntimeHealth(false);
     this.progressRefreshTimer = window.setInterval(() => {
-      if (this.plugin.settings.dashboardVaultExpanded && ["scanning", "indexing"].includes(this.plugin.ragIndexProgress.state)) {
-        void this.render();
+      this.renderJobList();
+      this.plugin.llm.redrawHistory();
+      if (this.plugin.settings.dashboardVaultExpanded && this.plugin.ragIndexProgress.state !== "idle") {
+        if (this.vaultProgressEl?.isConnected) {
+          this.vaultProgressEl.empty();
+          this.renderVaultIndexProgress(this.vaultProgressEl);
+        }
       }
     }, 1000);
     this.jobRefreshTimer = window.setInterval(() => void this.refreshJobs(false), 5000);
   }
 
   async onClose(): Promise<void> {
+    this.stopTaskSubscription?.();
+    this.stopTaskSubscription = null;
+    this.elapsedLabels.clear();
     if (this.progressRefreshTimer !== null) {
       window.clearInterval(this.progressRefreshTimer);
       this.progressRefreshTimer = null;
@@ -3360,10 +3443,20 @@ class NoteCompagnonDashboardView extends ItemView {
       ["Ouvrir comptes rendus", async () => this.plugin.openConfiguredFolder(this.plugin.getOutputFolder())],
     ]);
 
-    container.createEl("h3", { text: "Centre de taches" });
+    container.createEl("h3", { text: "Centre de tâches" });
     this.addActionGrid(container, [["Actualiser", async () => this.refreshJobs(true)]]);
+    const historyButton = container.createEl("button", { text: this.showTaskHistory ? "Masquer l’historique" : "Afficher l’historique" });
+    historyButton.addEventListener("click", () => {
+      this.showTaskHistory = !this.showTaskHistory;
+      historyButton.textContent = this.showTaskHistory ? "Masquer l’historique" : "Afficher l’historique";
+      this.plugin.llm.setHistoryExpanded(this.showTaskHistory);
+      this.renderJobList();
+    });
+    container.createEl("p", { text: "Les tâches terminées passent dans l’historique après 15 s. Les pourcentages indiquent les étapes accomplies, pas le temps restant." });
     this.jobListEl = container.createDiv({ cls: "notre-compagnon-job-list" });
+    this.taskListSignature = "";
     this.renderJobList();
+    this.plugin.llm.setHistoryExpanded(this.showTaskHistory);
     this.plugin.llm.renderHistory(container);
 
     container.createEl("h3", { text: "Assistant" });
@@ -3468,7 +3561,8 @@ class NoteCompagnonDashboardView extends ItemView {
       await this.render();
     }]]);
     if (this.plugin.settings.dashboardVaultExpanded) {
-      this.renderVaultIndexProgress(container);
+      this.vaultProgressEl = container.createDiv();
+      this.renderVaultIndexProgress(this.vaultProgressEl);
       this.addActionGrid(container, [
         ["Indexer note", async () => this.plugin.indexCurrentNote()],
         ["Indexer dossier", async () => this.plugin.indexCurrentFolder()],
@@ -3562,14 +3656,18 @@ class NoteCompagnonDashboardView extends ItemView {
   }
 
   private async refreshJobs(showErrors: boolean): Promise<void> {
-    if (!this.plugin.getConfigurationStatus().isReady) {
+    if (!this.plugin.getConfigurationStatus().isReady || this.jobsRefreshing) {
       return;
     }
+    this.jobsRefreshing = true;
     try {
       void this.plugin.llm.refreshHistory();
-      this.jobs = await this.plugin.listAudioJobs(20);
+      this.jobs = await this.plugin.listAudioJobs(50);
+      this.jobsError = "";
       this.renderJobList();
     } catch (error) {
+      this.jobsError = "Actualisation indisponible : les états serveur affichés sont les derniers reçus.";
+      this.renderJobList();
       if (showErrors) {
         this.plugin.showUserFacingError(error);
       } else {
@@ -3577,6 +3675,8 @@ class NoteCompagnonDashboardView extends ItemView {
           message: error instanceof Error ? error.message : String(error),
         });
       }
+    } finally {
+      this.jobsRefreshing = false;
     }
   }
 
@@ -3598,35 +3698,89 @@ class NoteCompagnonDashboardView extends ItemView {
     if (!this.jobListEl) {
       return;
     }
+    const localTasks = this.plugin.tasks.list();
+    // Completed enterprise results have their durable export/recovery controls below.
+    const visibleTasks = localTasks.filter(task => !(task.generationId && task.status === "completed")
+      && isTaskVisible(task.status, task.updatedAt, this.showTaskHistory));
+    const index = this.plugin.ragIndexProgress;
+    const indexStatus = index.state === "done" ? "completed" : index.state;
+    const showIndex = index.state !== "idle" && isTaskVisible(indexStatus, index.finishedAt ?? index.startedAt, this.showTaskHistory);
+    const visibleJobs = this.jobs.filter(job => isTaskVisible(job.status, job.completed_at ?? job.updated_at, this.showTaskHistory)
+      && !localTasks.some(task => task.jobId === job.job_id && (task.status === "running"
+        || (task.status === "completed" && (!task.generationId || !this.showTaskHistory)))));
+    for (const [label, clock] of this.elapsedLabels) {
+      if (label.isConnected) label.textContent = `Temps écoulé : ${formatElapsedTime(clock.startedAt, clock.finishedAt)}`;
+    }
+    const signature = JSON.stringify([visibleTasks, visibleJobs.map(({ updated_at, heartbeat_at, ...job }) => job),
+      this.jobs.map(job => [job.job_id, job.status]), showIndex ? index : null, this.showTaskHistory, this.jobsError, [...this.busyTaskActions]]);
+    if (signature === this.taskListSignature) return;
+    this.taskListSignature = signature;
     this.jobListEl.empty();
-    if (this.jobs.length === 0) {
-      this.jobListEl.createEl("p", { text: "Aucune transcription recente." });
-      return;
+    this.elapsedLabels.clear();
+    if (this.jobsError) this.jobListEl.createEl("p", { text: this.jobsError, attr: { role: "status" } });
+    for (const task of visibleTasks) {
+      const box = this.jobListEl.createDiv({ cls: "notre-compagnon-job" });
+      box.style.margin = "12px 0";
+      box.createEl("strong", { text: task.title });
+      renderTaskProgress(box, task);
+      const finishedAt = task.status === "running" ? undefined : task.updatedAt;
+      const elapsed = box.createEl("div", { text: `Temps écoulé : ${formatElapsedTime(task.startedAt, finishedAt)}` });
+      this.elapsedLabels.set(elapsed, { startedAt: task.startedAt, finishedAt });
+      if (task.status === "running" && (task.generationId || (task.jobId && task.percent < 40))) {
+        const key = `cancel:${task.id}`;
+        const cancel = box.createEl("button", { text: "Annuler" });
+        cancel.disabled = this.busyTaskActions.has(key);
+        cancel.addEventListener("click", () => void this.runTaskAction(key, async () => {
+          if (task.generationId) {
+            const result = await this.plugin.llm.cancelGeneration(task.generationId);
+            if (result.status === "cancelled") this.plugin.tasks.cancel(task.id, "Génération annulée.");
+          } else if (task.jobId) {
+            await this.plugin.cancelAudioJob(task.jobId);
+            this.plugin.tasks.update(task.id, { phase: "Annulation demandée", detail: "Attente de confirmation du serveur." });
+          }
+        }));
+      }
+      if (task.outputPath) {
+        const open = box.createEl("button", { text: "Ouvrir la note" });
+        open.addEventListener("click", async () => {
+          try {
+            const file = this.app.vault.getAbstractFileByPath(task.outputPath!);
+            if (!(file instanceof TFile)) throw new UserFacingError("La note a été déplacée ou supprimée.");
+            await this.app.workspace.getLeaf(true).openFile(file);
+          } catch (error) { this.plugin.showUserFacingError(error); }
+        });
+      }
+      if (task.status === "completed" && task.jobId && !task.generationId) {
+        const job = this.jobs.find(entry => entry.job_id === task.jobId && entry.status === "completed");
+        if (job) this.renderResumeJobButton(box, job);
+      }
     }
 
-    for (const job of this.jobs) {
+    if (showIndex) {
+      const box = this.jobListEl.createDiv();
+      box.style.margin = "12px 0";
+      box.createEl("strong", { text: index.label || "Indexation du coffre" });
+      renderTaskProgress(box, {
+        percent: index.total > 0 ? Math.round(100 * index.processed / index.total) : 0,
+        phase: index.state === "done" ? "Indexation terminée" : index.state === "failed" ? "Indexation terminée avec erreurs" : index.state === "cancelled" ? "Indexation annulée" : "Indexation en cours",
+        detail: `${index.processed}/${index.total} notes traitées · ${index.errors} erreurs`,
+      });
+    }
+    if (!visibleTasks.length && !visibleJobs.length && !showIndex) {
+      this.jobListEl.createEl("p", { text: this.showTaskHistory ? "Aucun traitement audio ou local à afficher." : "Aucun traitement audio ou local en cours. Les résultats précédents restent accessibles dans l’historique." });
+    }
+
+    for (const job of visibleJobs) {
       const box = this.jobListEl.createDiv({ cls: "notre-compagnon-job" });
       box.style.border = "1px solid var(--background-modifier-border)";
       box.style.borderRadius = "8px";
       box.style.padding = "8px";
       box.style.margin = "8px 0";
-      const title = job.display_name || `Transcription ${job.job_id.slice(0, 8)}`;
+      const title = `Transcription · ${job.display_name || job.job_id.slice(0, 8)}`;
       box.createEl("strong", { text: title });
-      const state = job.stalled ? "bloquee (heartbeat absent)" : formatJobStatusLabel(job.status);
-      box.createEl("div", { text: `${state} | ${job.phase} | ${job.progress} % | tentative ${job.attempts}` });
-      if (job.progress_message) {
-        box.createEl("div", { text: job.progress_message });
-      }
-      const barOuter = box.createDiv();
-      barOuter.style.height = "7px";
-      barOuter.style.background = "var(--background-modifier-border)";
-      barOuter.style.borderRadius = "999px";
-      barOuter.style.overflow = "hidden";
-      barOuter.style.margin = "6px 0";
-      const barInner = barOuter.createDiv();
-      barInner.style.height = "100%";
-      barInner.style.width = `${Math.max(0, Math.min(job.progress, 100))}%`;
-      barInner.style.background = job.status === "failed" || job.stalled ? "var(--text-error)" : "var(--interactive-accent)";
+      const stage = audioMilestone(job);
+      renderTaskProgress(box, { percent: job.progress, phase: stage.phase, detail: stage.detail });
+      box.createEl("small", { text: "Progression de la transcription seule ; le compte rendu est une étape distincte." });
       const date = new Date(job.created_at);
       box.createEl("small", { text: `${Number.isNaN(date.getTime()) ? job.created_at : date.toLocaleString()} | ${job.job_id}` });
 
@@ -3637,25 +3791,15 @@ class NoteCompagnonDashboardView extends ItemView {
       controls.style.marginTop = "6px";
       if (["queued", "processing"].includes(job.status)) {
         const cancelButton = controls.createEl("button", { text: job.cancel_requested ? "Annulation demandee" : "Annuler" });
-        cancelButton.disabled = job.cancel_requested;
-        cancelButton.addEventListener("click", async () => {
-          try {
+        const key = `cancel-job:${job.job_id}`;
+        cancelButton.disabled = job.cancel_requested || this.busyTaskActions.has(key);
+        cancelButton.addEventListener("click", () => void this.runTaskAction(key, async () => {
             await this.plugin.cancelAudioJob(job.job_id);
             await this.refreshJobs(true);
-          } catch (error) {
-            this.plugin.showUserFacingError(error);
-          }
-        });
+        }));
       }
       if (job.status === "completed") {
-        const resumeButton = controls.createEl("button", { text: "Creer / reprendre le CR" });
-        resumeButton.addEventListener("click", async () => {
-          try {
-            await this.plugin.resumeMeetingFromCompletedJob(job);
-          } catch (error) {
-            this.plugin.showUserFacingError(error);
-          }
-        });
+        this.renderResumeJobButton(controls, job);
       }
       if (job.error) {
         const details = box.createEl("details");
@@ -3663,6 +3807,24 @@ class NoteCompagnonDashboardView extends ItemView {
         details.createEl("pre", { text: job.error });
       }
     }
+  }
+
+  private renderResumeJobButton(parent: HTMLElement, job: JobStatusResponsePayload): void {
+    const button = parent.createEl("button", { text: "Créer / reprendre le CR" });
+    const key = `resume:${job.job_id}`;
+    button.disabled = this.busyTaskActions.has(key);
+    button.addEventListener("click", () => void this.runTaskAction(key, async () => {
+      await this.plugin.resumeMeetingFromCompletedJob(job);
+    }));
+  }
+
+  private async runTaskAction(key: string, action: () => Promise<void>): Promise<void> {
+    if (this.busyTaskActions.has(key)) return;
+    this.busyTaskActions.add(key);
+    this.renderJobList();
+    try { await action(); }
+    catch (error) { this.plugin.showUserFacingError(error); }
+    finally { this.busyTaskActions.delete(key); this.renderJobList(); }
   }
 
   private renderVaultIndexProgress(container: HTMLElement): void {

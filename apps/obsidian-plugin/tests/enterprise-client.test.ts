@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EnterpriseError, EnterpriseHttpClient, parseEnterpriseCompletion, type EnterpriseTransport, type EnterpriseTransportResponse } from "../src/enterprise-transport";
+import { ENTERPRISE_ORIGIN, EnterpriseError, EnterpriseHttpClient, parseEnterpriseCompletion, type EnterpriseTransport, type EnterpriseTransportResponse } from "../src/enterprise-transport";
 import { EnterpriseRelayClient, type GatewayRequest, type GatewayRequestOptions, type GenerationStatus } from "../src/enterprise-relay";
 
 const TOKEN = "fake-enterprise-token-for-tests";
@@ -33,6 +33,64 @@ test("transport receives only fixed paths and explicit text completion payload",
   assert.deepEqual(JSON.parse(calls[1].body!), { model: MODEL, messages: [{ role: "user", content: "Question" }], stream: false });
   await assert.rejects(client.complete(MODEL, [{ role: "tool", content: "bad" }] as never));
   assert.equal(calls.length, 2);
+});
+
+test("HeadMind gpt-oss-120b curl contract preserves the request and returns only the final answer", async () => {
+  const calls: Parameters<EnterpriseTransport>[0][] = [];
+  // Sanitized response captured by the user on the professional PC; no live API call.
+  const response = {
+    id: "chatcmpl-98fa01812f7a7223", object: "chat.completion", created: 1791557345,
+    model: "gpt-oss-120b",
+    choices: [{
+      index: 0,
+      message: {
+        role: "assistant", content: "OK", refusal: null, annotations: null, audio: null,
+        function_call: null,
+        reasoning: 'User says "Réponds simplement OK." Means "Reply simply OK." So we should reply "OK". Probably just "OK".',
+      },
+      logprobs: null, finish_reason: "stop", stop_reason: null, token_ids: null, routed_experts: null,
+    }],
+    service_tier: null, system_fingerprint: "vllm-0.24.0-b59144db",
+    usage: { prompt_tokens: 73, total_tokens: 111, completion_tokens: 38, prompt_tokens_details: null },
+    prompt_logprobs: null, prompt_token_ids: null, prompt_text: null, kv_transfer_params: null,
+  };
+  const client = new EnterpriseHttpClient(true, async (request) => { calls.push(request); return json(response); });
+  client.setToken(TOKEN);
+
+  const result = await client.complete("gpt-oss-120b", [{ role: "user", content: "Réponds simplement OK." }]);
+
+  assert.equal(calls.length, 1);
+  assert.equal(new URL(calls[0].path, ENTERPRISE_ORIGIN).href, "https://ai.headmind.com/api/chat/completions");
+  assert.equal(calls[0].method, "POST");
+  assert.equal(calls[0].headers.Authorization, `Bearer ${TOKEN}`);
+  assert.equal(calls[0].headers["Content-Type"], "application/json");
+  assert.deepEqual(JSON.parse(calls[0].body!), {
+    model: "gpt-oss-120b", messages: [{ role: "user", content: "Réponds simplement OK." }], stream: false,
+  });
+  assert.deepEqual(result, { model: "gpt-oss-120b", content: "OK" });
+});
+
+test("model discovery refreshes a single-model catalogue when more models become available", async () => {
+  const calls: Parameters<EnterpriseTransport>[0][] = [];
+  const catalogues = [
+    { data: [{ id: "gpt-oss-120b" }] },
+    { data: [{ id: "gpt-oss-120b" }, { id: "future-company-model" }, { id: "gpt-oss-120b" }] },
+  ];
+  const client = new EnterpriseHttpClient(true, async (request) => {
+    calls.push(request);
+    return json(catalogues[calls.length - 1]);
+  });
+  client.setToken(TOKEN);
+
+  assert.deepEqual(await client.listModels(), ["gpt-oss-120b"]);
+  assert.deepEqual(await client.listModels(), ["gpt-oss-120b", "future-company-model"]);
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.equal(new URL(call.path, ENTERPRISE_ORIGIN).href, "https://ai.headmind.com/api/models");
+    assert.equal(call.method, "GET");
+    assert.equal(call.headers.Authorization, `Bearer ${TOKEN}`);
+    assert.equal(call.body, undefined);
+  }
 });
 
 test("SSE reasoning is excluded and unfinished or tool results are rejected", () => {
